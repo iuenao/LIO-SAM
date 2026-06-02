@@ -53,6 +53,9 @@
     surfThreshold: 0.1
     edgeFeatureMinValidNum: 10
     surfFeatureMinValidNum: 100
+    robustKernelType: 0
+    huberDelta: 0.1
+    cauchyC: 0.8
 
     odometrySurfLeafSize: 0.2
     mappingCornerLeafSize: 0.1

@@ -5,6 +5,8 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
@@ -87,6 +89,13 @@ install(
 install(
   DIRECTORY config
   DESTINATION share/${PROJECT_NAME}/
+)
+
+install(
+  PROGRAMS
+    scripts/run_ablation_bags.py
+    scripts/evaluate_tum_trajectories.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(

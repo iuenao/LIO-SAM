@@ -125,6 +125,11 @@ public:
     int edgeFeatureMinValidNum;
     int surfFeatureMinValidNum;
 
+    // Robust scan-to-map kernels
+    int robustKernelType;
+    float huberDelta;
+    float cauchyC;
+
     // voxel filter paprams
     float odometrySurfLeafSize;
     float mappingCornerLeafSize;
@@ -274,6 +279,13 @@ public:
         get_parameter("edgeFeatureMinValidNum", edgeFeatureMinValidNum);
         declare_parameter("surfFeatureMinValidNum", 100);
         get_parameter("surfFeatureMinValidNum", surfFeatureMinValidNum);
+
+        declare_parameter("robustKernelType", 0);
+        get_parameter("robustKernelType", robustKernelType);
+        declare_parameter("huberDelta", 0.1);
+        get_parameter("huberDelta", huberDelta);
+        declare_parameter("cauchyC", 0.8);
+        get_parameter("cauchyC", cauchyC);
 
         declare_parameter("odometrySurfLeafSize", 0.4);
         get_parameter("odometrySurfLeafSize", odometrySurfLeafSize);

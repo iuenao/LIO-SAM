@@ -54,6 +54,9 @@
     surfThreshold: 0.1
     edgeFeatureMinValidNum: 10
     surfFeatureMinValidNum: 100
+    robustKernelType: 0                         # 0: none/fixed, 1: Huber, 2: Cauchy
+    huberDelta: 0.1
+    cauchyC: 0.8
 
     # voxel filter paprams
     odometrySurfLeafSize: 0.4                     # default: 0.4 - outdoor, 0.2 - indoor

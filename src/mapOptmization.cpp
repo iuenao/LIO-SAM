@@ -16,6 +16,10 @@
 
 #include <gtsam/nonlinear/ISAM2.h>
 
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+
 using namespace gtsam;
 
 using symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
@@ -130,6 +134,21 @@ public:
 
     bool isDegenerate = false;
     Eigen::Matrix<float, 6, 6> matP;
+
+    std::ofstream trajectoryFile;
+    std::ofstream tumTrajectoryFile;
+    bool trajectoryFileOpen = false;
+    bool tumTrajectoryFileOpen = false;
+    bool enableTrajectoryCSV = false;
+    bool enableDiagnosticsCSV = false;
+    std::string diagnosticsOutputDir;
+    std::string diagnosticsFilePrefix;
+    std::string runId;
+    std::string datasetName;
+    std::string sequenceName;
+    std::string methodName;
+    std::string configFile;
+    std::string bagName;
 
     int laserCloudCornerFromMapDSNum = 0;
     int laserCloudSurfFromMapDSNum = 0;
@@ -250,6 +269,140 @@ public:
         downSizeFilterSurroundingKeyPoses.setLeafSize(surroundingKeyframeDensity, surroundingKeyframeDensity, surroundingKeyframeDensity); // for surrounding key poses of scan-to-map optimization
 
         allocateMemory();
+
+        initialiseLoggers();
+    }
+
+    void initialiseLoggers()
+    {
+        enableTrajectoryCSV = declare_parameter<bool>("enableTrajectoryCSV", false);
+        enableDiagnosticsCSV = declare_parameter<bool>("enableDiagnosticsCSV", false);
+        diagnosticsOutputDir = declare_parameter<std::string>(
+            "diagnosticsOutputDir", "/home/unitree/ros2_workspaces/lio_ws/lio_sam_logs");
+        diagnosticsFilePrefix = declare_parameter<std::string>("diagnosticsFilePrefix", "run");
+        runId = declare_parameter<std::string>("run_id", diagnosticsFilePrefix);
+        datasetName = declare_parameter<std::string>("dataset_name", "unknown");
+        sequenceName = declare_parameter<std::string>("sequence_name", "unknown");
+        methodName = declare_parameter<std::string>("method_name", "fixed");
+        configFile = declare_parameter<std::string>("config_file", "unknown");
+        bagName = declare_parameter<std::string>("bag_name", "unknown");
+
+        if (!enableTrajectoryCSV && !enableDiagnosticsCSV)
+            return;
+
+        std::error_code ec;
+        std::filesystem::create_directories(diagnosticsOutputDir, ec);
+        if (ec)
+        {
+            RCLCPP_WARN(get_logger(),
+                "Could not create diagnostics directory %s: %s",
+                diagnosticsOutputDir.c_str(), ec.message().c_str());
+            return;
+        }
+
+        if (enableDiagnosticsCSV)
+            saveConfigSnapshot();
+
+        if (enableTrajectoryCSV)
+        {
+            std::filesystem::path trajectoryPath =
+                std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_trajectory.csv");
+            trajectoryFile.open(trajectoryPath, std::ios::out | std::ios::trunc);
+            if (trajectoryFile.is_open())
+            {
+                trajectoryFileOpen = true;
+                trajectoryFile
+                    << "timestamp,x,y,z,qx,qy,qz,qw,roll,pitch,yaw,"
+                    << "run_id,dataset_name,sequence_name,method_name,config_file,bag_name"
+                    << std::endl;
+                RCLCPP_INFO(get_logger(), "Trajectory CSV opened at %s", trajectoryPath.string().c_str());
+            }
+            else
+            {
+                RCLCPP_WARN(get_logger(), "Failed to open trajectory CSV at %s", trajectoryPath.string().c_str());
+            }
+
+            std::filesystem::path tumPath =
+                std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_tum.txt");
+            tumTrajectoryFile.open(tumPath, std::ios::out | std::ios::trunc);
+            if (tumTrajectoryFile.is_open())
+            {
+                tumTrajectoryFileOpen = true;
+                RCLCPP_INFO(get_logger(), "TUM trajectory opened at %s", tumPath.string().c_str());
+            }
+            else
+            {
+                RCLCPP_WARN(get_logger(), "Failed to open TUM trajectory at %s", tumPath.string().c_str());
+            }
+        }
+    }
+
+    std::string csvEscape(const std::string& value) const
+    {
+        if (value.find_first_of(",\"\n") == std::string::npos)
+            return value;
+
+        std::string escaped = "\"";
+        for (char c : value)
+        {
+            if (c == '"')
+                escaped += "\"\"";
+            else
+                escaped += c;
+        }
+        escaped += "\"";
+        return escaped;
+    }
+
+    void saveConfigSnapshot()
+    {
+        std::filesystem::path snapshotPath =
+            std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_config_snapshot.yaml");
+        std::ofstream snapshot(snapshotPath, std::ios::out | std::ios::trunc);
+        if (!snapshot.is_open())
+        {
+            RCLCPP_WARN(get_logger(), "Failed to write config snapshot at %s", snapshotPath.string().c_str());
+            return;
+        }
+
+        snapshot << "# Runtime parameter snapshot generated by lio_sam_mapOptimization\n";
+        for (const auto& name : list_parameters({}, 10).names)
+        {
+            rclcpp::Parameter parameter;
+            if (get_parameter(name, parameter))
+                snapshot << name << ": " << parameter.value_to_string() << "\n";
+        }
+    }
+
+    void writeTrajectoryLogs(const PointTypePose& pose_in, const tf2::Quaternion& q)
+    {
+        if (!trajectoryFileOpen && !tumTrajectoryFileOpen)
+            return;
+
+        if (trajectoryFileOpen)
+        {
+            trajectoryFile << std::fixed << std::setprecision(9)
+                           << pose_in.time << ","
+                           << pose_in.x << "," << pose_in.y << "," << pose_in.z << ","
+                           << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << ","
+                           << pose_in.roll << "," << pose_in.pitch << "," << pose_in.yaw << ","
+                           << csvEscape(runId) << ","
+                           << csvEscape(datasetName) << ","
+                           << csvEscape(sequenceName) << ","
+                           << csvEscape(methodName) << ","
+                           << csvEscape(configFile) << ","
+                           << csvEscape(bagName)
+                           << std::endl;
+        }
+
+        if (tumTrajectoryFileOpen)
+        {
+            tumTrajectoryFile << std::fixed << std::setprecision(9)
+                              << pose_in.time << " "
+                              << pose_in.x << " " << pose_in.y << " " << pose_in.z << " "
+                              << q.x() << " " << q.y() << " " << q.z() << " " << q.w()
+                              << std::endl;
+        }
     }
 
     void allocateMemory()
@@ -1214,14 +1367,17 @@ public:
             float arz = ((crz*srx*sry - cry*srz)*pointOri.x + (-cry*crz-srx*sry*srz)*pointOri.y)*coeff.x
                       + (crx*crz*pointOri.x - crx*srz*pointOri.y) * coeff.y
                       + ((sry*srz + cry*crz*srx)*pointOri.x + (crz*sry-cry*srx*srz)*pointOri.y)*coeff.z;
+            const float robustWeight = computeRobustWeight(coeff.intensity);
+            const float sqrtWeight = std::sqrt(std::max(robustWeight, 1e-3f));
+
             // lidar -> camera
-            matA.at<float>(i, 0) = arz;
-            matA.at<float>(i, 1) = arx;
-            matA.at<float>(i, 2) = ary;
-            matA.at<float>(i, 3) = coeff.z;
-            matA.at<float>(i, 4) = coeff.x;
-            matA.at<float>(i, 5) = coeff.y;
-            matB.at<float>(i, 0) = -coeff.intensity;
+            matA.at<float>(i, 0) = sqrtWeight * arz;
+            matA.at<float>(i, 1) = sqrtWeight * arx;
+            matA.at<float>(i, 2) = sqrtWeight * ary;
+            matA.at<float>(i, 3) = sqrtWeight * coeff.z;
+            matA.at<float>(i, 4) = sqrtWeight * coeff.x;
+            matA.at<float>(i, 5) = sqrtWeight * coeff.y;
+            matB.at<float>(i, 0) = -sqrtWeight * coeff.intensity;
         }
 
         cv::transpose(matA, matAt);
@@ -1352,6 +1508,27 @@ public:
             value = limit;
 
         return value;
+    }
+
+    float computeRobustWeight(float residual)
+    {
+        const float abs_r = std::fabs(residual);
+
+        switch (robustKernelType)
+        {
+            case 1:
+                if (abs_r <= huberDelta)
+                    return 1.0f;
+                return huberDelta / std::max(abs_r, 1e-6f);
+            case 2:
+            {
+                const float c = std::max(cauchyC, 1e-6f);
+                const float r_over_c = residual / c;
+                return 1.0f / (1.0f + r_over_c * r_over_c);
+            }
+            default:
+                return 1.0f;
+        }
     }
 
     bool saveFrame()
@@ -1631,6 +1808,7 @@ public:
         pose_stamped.pose.orientation.w = q.w();
 
         globalPath.poses.push_back(pose_stamped);
+        writeTrajectoryLogs(pose_in, q);
     }
 
     void publishOdometry()

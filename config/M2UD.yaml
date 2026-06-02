@@ -58,6 +58,9 @@
     surfThreshold: 0.1
     edgeFeatureMinValidNum: 10
     surfFeatureMinValidNum: 100
+    robustKernelType: 0
+    huberDelta: 0.1
+    cauchyC: 0.8
 
     # Voxel filters.
     odometrySurfLeafSize: 0.4
