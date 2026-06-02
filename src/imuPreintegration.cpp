@@ -115,6 +115,8 @@ public:
         auto t = tf2::eigenToTransform(imuOdomAffineLast);
         tf2::Stamped<tf2::Transform> tCur;
         tf2::convert(t, tCur);
+        tCur.stamp_ = tf2_ros::fromMsg(odomMsg->header.stamp);
+        tCur.frame_id_ = odometryFrame;
 
         // publish latest odometry
         nav_msgs::msg::Odometry laserOdometry = imuOdomQueue.back();
@@ -457,7 +459,7 @@ public:
             {
                 sensor_msgs::msg::Imu *thisImu = &imuQueImu[i];
                 double imuTime = stamp2Sec(thisImu->header.stamp);
-                double dt = (lastImuQT < 0) ? (1.0 / 500.0) :(imuTime - lastImuQT);
+                double dt = (lastImuQT < 0) ? (1.0 / imuRate) :(imuTime - lastImuQT);
 
                 imuIntegratorImu_->integrateMeasurement(gtsam::Vector3(thisImu->linear_acceleration.x, thisImu->linear_acceleration.y, thisImu->linear_acceleration.z),
                                                         gtsam::Vector3(thisImu->angular_velocity.x,    thisImu->angular_velocity.y,    thisImu->angular_velocity.z), dt);
@@ -472,17 +474,21 @@ public:
     bool failureDetection(const gtsam::Vector3& velCur, const gtsam::imuBias::ConstantBias& biasCur)
     {
         Eigen::Vector3f vel(velCur.x(), velCur.y(), velCur.z());
-        if (vel.norm() > 30)
+        if (vel.norm() > imuFailureVelocityThreshold)
         {
-            RCLCPP_WARN(get_logger(), "Large velocity, reset IMU-preintegration!");
+            RCLCPP_WARN(get_logger(),
+                "Large velocity %.3f m/s > %.3f m/s, reset IMU-preintegration! vel=[%.3f %.3f %.3f]",
+                vel.norm(), imuFailureVelocityThreshold, vel.x(), vel.y(), vel.z());
             return true;
         }
 
         Eigen::Vector3f ba(biasCur.accelerometer().x(), biasCur.accelerometer().y(), biasCur.accelerometer().z());
         Eigen::Vector3f bg(biasCur.gyroscope().x(), biasCur.gyroscope().y(), biasCur.gyroscope().z());
-        if (ba.norm() > 1.0 || bg.norm() > 1.0)
+        if (ba.norm() > imuFailureBiasThreshold || bg.norm() > imuFailureBiasThreshold)
         {
-            RCLCPP_WARN(get_logger(), "Large bias, reset IMU-preintegration!");
+            RCLCPP_WARN(get_logger(),
+                "Large bias, reset IMU-preintegration! ba_norm=%.3f bg_norm=%.3f threshold=%.3f",
+                ba.norm(), bg.norm(), imuFailureBiasThreshold);
             return true;
         }
 
@@ -502,7 +508,7 @@ public:
             return;
 
         double imuTime = stamp2Sec(thisImu.header.stamp);
-        double dt = (lastImuT_imu < 0) ? (1.0 / 500.0) : (imuTime - lastImuT_imu);
+        double dt = (lastImuT_imu < 0) ? (1.0 / imuRate) : (imuTime - lastImuT_imu);
         lastImuT_imu = imuTime;
 
         // integrate this single imu message

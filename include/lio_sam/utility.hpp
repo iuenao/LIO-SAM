@@ -100,6 +100,11 @@ public:
     float lidarMaxRange;
 
     // IMU
+    int imuType;
+    float imuRate;
+    bool imuAccInG;
+    double imuFailureVelocityThreshold;
+    double imuFailureBiasThreshold;
     float imuAccNoise;
     float imuGyrNoise;
     float imuAccBiasN;
@@ -220,6 +225,16 @@ public:
         declare_parameter("lidarMaxRange", 1000.0);
         get_parameter("lidarMaxRange", lidarMaxRange);
 
+        declare_parameter("imuType", 0);
+        get_parameter("imuType", imuType);
+        declare_parameter("imuRate", 500.0);
+        get_parameter("imuRate", imuRate);
+        declare_parameter("imuAccInG", false);
+        get_parameter("imuAccInG", imuAccInG);
+        declare_parameter("imuFailureVelocityThreshold", 30.0);
+        get_parameter("imuFailureVelocityThreshold", imuFailureVelocityThreshold);
+        declare_parameter("imuFailureBiasThreshold", 1.0);
+        get_parameter("imuFailureBiasThreshold", imuFailureBiasThreshold);
         declare_parameter("imuAccNoise", 9e-4);
         get_parameter("imuAccNoise", imuAccNoise);
         declare_parameter("imuGyrNoise", 1.6e-4);
@@ -249,7 +264,7 @@ public:
         extRot = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRotV.data(), 3, 3);
         extRPY = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRPYV.data(), 3, 3);
         extTrans = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extTransV.data(), 3, 1);
-        extQRPY = Eigen::Quaterniond(extRPY);
+        extQRPY = Eigen::Quaterniond(extRPY).inverse();
 
         declare_parameter("edgeThreshold", 1.0);
         get_parameter("edgeThreshold", edgeThreshold);
@@ -316,6 +331,8 @@ public:
         sensor_msgs::msg::Imu imu_out = imu_in;
         // rotate acceleration
         Eigen::Vector3d acc(imu_in.linear_acceleration.x, imu_in.linear_acceleration.y, imu_in.linear_acceleration.z);
+        if (imuAccInG)
+            acc *= imuGravity;
         acc = extRot * acc;
         imu_out.linear_acceleration.x = acc.x();
         imu_out.linear_acceleration.y = acc.y();
@@ -326,18 +343,21 @@ public:
         imu_out.angular_velocity.x = gyr.x();
         imu_out.angular_velocity.y = gyr.y();
         imu_out.angular_velocity.z = gyr.z();
-        // rotate roll pitch yaw
-        Eigen::Quaterniond q_from(imu_in.orientation.w, imu_in.orientation.x, imu_in.orientation.y, imu_in.orientation.z);
-        Eigen::Quaterniond q_final = q_from * extQRPY;
-        imu_out.orientation.x = q_final.x();
-        imu_out.orientation.y = q_final.y();
-        imu_out.orientation.z = q_final.z();
-        imu_out.orientation.w = q_final.w();
-
-        if (sqrt(q_final.x()*q_final.x() + q_final.y()*q_final.y() + q_final.z()*q_final.z() + q_final.w()*q_final.w()) < 0.1)
+        if (imuType)
         {
-            RCLCPP_ERROR(get_logger(), "Invalid quaternion, please use a 9-axis IMU!");
-            rclcpp::shutdown();
+            // rotate roll pitch yaw
+            Eigen::Quaterniond q_from(imu_in.orientation.w, imu_in.orientation.x, imu_in.orientation.y, imu_in.orientation.z);
+            Eigen::Quaterniond q_final = q_from * extQRPY;
+            imu_out.orientation.x = q_final.x();
+            imu_out.orientation.y = q_final.y();
+            imu_out.orientation.z = q_final.z();
+            imu_out.orientation.w = q_final.w();
+
+            if (sqrt(q_final.x()*q_final.x() + q_final.y()*q_final.y() + q_final.z()*q_final.z() + q_final.w()*q_final.w()) < 0.1)
+            {
+                RCLCPP_ERROR(get_logger(), "Invalid quaternion, please use a 9-axis IMU!");
+                rclcpp::shutdown();
+            }
         }
 
         return imu_out;

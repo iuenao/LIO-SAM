@@ -362,8 +362,9 @@ public:
             sensor_msgs::msg::Imu thisImuMsg = imuQueue[i];
             double currentImuTime = stamp2Sec(thisImuMsg.header.stamp);
 
-            // get roll, pitch, and yaw estimation for this scan
-            if (currentImuTime <= timeScanCur)
+            // get roll, pitch, and yaw estimation for this scan when a 9-axis
+            // IMU orientation is available.
+            if (imuType && currentImuTime <= timeScanCur)
                 imuRPY2rosRPY(&thisImuMsg, &cloudInfo.imu_roll_init, &cloudInfo.imu_pitch_init, &cloudInfo.imu_yaw_init);
             if (currentImuTime > timeScanEnd + 0.01)
                 break;

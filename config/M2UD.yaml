@@ -1,0 +1,93 @@
+/**:
+  ros__parameters:
+
+    # M2UD Plaza topics used by the liorf M2UD launch/config.
+    pointCloudTopic: "velodyne_points"
+    imuTopic: "imu/data"
+    odomTopic: "odometry/imu"
+    gpsTopic: "gps/fixz"
+
+    # Use the same frame convention as the liorf M2UD baseline.
+    lidarFrame: "base_link"
+    baselinkFrame: "base_link"
+    odometryFrame: "odom"
+    mapFrame: "map"
+
+    # GPS settings. Pure LIO-SAM can use GPS if /gps/fixz is available, but
+    # M2UD bag runs normally work as lidar-inertial odometry only.
+    useImuHeadingInitialization: true
+    useGpsElevation: true
+    gpsCovThreshold: 2.0
+    poseCovThreshold: 25.0
+
+    # Export settings.
+    savePCD: false
+    savePCDDirectory: "/Downloads/LOAM/"
+
+    # M2UD uses a 32-channel spinning lidar in the existing liorf setup.
+    sensor: velodyne
+    N_SCAN: 32
+    Horizon_SCAN: 1800
+    downsampleRate: 1
+    lidarMinRange: 2.0
+    lidarMaxRange: 1000.0
+
+    # IMU noise and lidar->IMU extrinsics copied from liorf's M2UD.yaml.
+    imuType: 0
+    imuRate: 100.0
+    imuAccInG: false
+    imuFailureVelocityThreshold: 80.0
+    imuFailureBiasThreshold: 1.0
+    imuAccNoise: 0.01256144599541998
+    imuGyrNoise: 9.331396894090049e-05
+    imuAccBiasN: 0.0001286757133427232
+    imuGyrBiasN: 0.0001286757133427232
+    imuGravity: 9.80511
+    imuRPYWeight: 0.01
+
+    extrinsicTrans: [-0.01907, 0.0045, 0.05714]
+    extrinsicRot: [1.0, 0.0, 0.0,
+                   0.0, 1.0, 0.0,
+                   0.0, 0.0, 1.0]
+    extrinsicRPY: [-0.132824, 0.0, 0.0,
+                   0.0, -1.202763, 0.0,
+                   0.0, 0.0, -1.853268]
+
+    # LOAM feature extraction.
+    edgeThreshold: 1.0
+    surfThreshold: 0.1
+    edgeFeatureMinValidNum: 10
+    surfFeatureMinValidNum: 100
+
+    # Voxel filters.
+    odometrySurfLeafSize: 0.4
+    mappingCornerLeafSize: 0.2
+    mappingSurfLeafSize: 0.4
+
+    # Motion constraints.
+    z_tollerance: 1000.0
+    rotation_tollerance: 1000.0
+
+    # CPU and mapping cadence.
+    numberOfCores: 4
+    mappingProcessInterval: 0.0
+
+    # Local map settings.
+    surroundingkeyframeAddingDistThreshold: 1.0
+    surroundingkeyframeAddingAngleThreshold: 0.2
+    surroundingKeyframeDensity: 2.0
+    surroundingKeyframeSearchRadius: 50.0
+
+    # Keep loop closure off to match the liorf M2UD baseline.
+    loopClosureEnableFlag: false
+    loopClosureFrequency: 1.0
+    surroundingKeyframeSize: 50
+    historyKeyframeSearchRadius: 15.0
+    historyKeyframeSearchTimeDiff: 30.0
+    historyKeyframeSearchNum: 25
+    historyKeyframeFitnessScore: 0.3
+
+    # Visualization.
+    globalMapVisualizationSearchRadius: 1000.0
+    globalMapVisualizationPoseDensity: 1.0
+    globalMapVisualizationLeafSize: 0.5

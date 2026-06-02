@@ -30,6 +30,7 @@ find_package(PCL REQUIRED)
 find_package(GTSAM REQUIRED)
 find_package(Eigen REQUIRED)
 find_package(OpenMP REQUIRED)
+find_package(livox_ros_driver2 QUIET)
 
 include_directories(
   include/lio_sam
@@ -58,6 +59,23 @@ if (OpenMP_CXX_FOUND)
   target_link_libraries(${PROJECT_NAME}_mapOptimization gtsam "${cpp_typesupport_target}" OpenMP::OpenMP_CXX)
 else()
   target_link_libraries(${PROJECT_NAME}_mapOptimization gtsam "${cpp_typesupport_target}")
+endif()
+
+if(livox_ros_driver2_FOUND)
+  add_executable(${PROJECT_NAME}_livoxConverter src/livoxConverter.cpp)
+  ament_target_dependencies(${PROJECT_NAME}_livoxConverter rclcpp sensor_msgs livox_ros_driver2)
+
+  add_executable(${PROJECT_NAME}_livoxConverterOld src/livoxConverterOld.cpp)
+  ament_target_dependencies(${PROJECT_NAME}_livoxConverterOld rclcpp sensor_msgs livox_ros_driver2)
+
+  install(
+    TARGETS ${PROJECT_NAME}_livoxConverter ${PROJECT_NAME}_livoxConverterOld
+    DESTINATION lib/${PROJECT_NAME}
+  )
+
+  message(STATUS "livox_ros_driver2 found - building Livox converters")
+else()
+  message(STATUS "livox_ros_driver2 NOT found - skipping Livox converters")
 endif()
 
 
@@ -110,4 +128,3 @@ if(BUILD_TESTING)
 endif()
 
 ament_package()
-
