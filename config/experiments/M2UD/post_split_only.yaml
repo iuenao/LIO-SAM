@@ -1,0 +1,10 @@
+/**:
+  ros__parameters:
+    viEnabled: false
+    registrationWeightMode: 0
+    factorCovarianceMode: 4
+    degeneracyHessianMode: 0
+    robustKernelType: 0
+    adaptiveCovEnabled: false
+    adaptiveCovMode: 0
+    method_name: "post_split_only"

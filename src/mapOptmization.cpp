@@ -17,7 +17,9 @@
 #include <gtsam/nonlinear/ISAM2.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 
 using namespace gtsam;
@@ -52,7 +54,56 @@ struct ResidualReliability
     float geometry = 1.0f;
     float residual = 1.0f;
     float weight = 1.0f;
+    float rawResidual = 0.0f;
+    float scaledResidual = 0.0f;
+    float lioSamBaseScale = 1.0f;
     int featureType = 0; // 1: corner, 2: surf
+};
+
+struct FinalCorrespondence
+{
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    enum class FeatureType : uint8_t
+    {
+        Corner = 1,
+        Surface = 2
+    };
+
+    FeatureType type = FeatureType::Surface;
+    double rawResidual = 0.0;
+    double lioSamBaseScale = 1.0;
+    Eigen::Matrix<double, 1, 6> baseJacobian = Eigen::Matrix<double, 1, 6>::Zero();
+    double geometryReliability = 1.0;
+    double residualReliability = 1.0;
+};
+
+struct FactorInformationDiagnostics
+{
+    double timestamp = 0.0;
+    int registrationWeightMode = 0;
+    int factorCovarianceMode = 0;
+    int numCorner = 0;
+    int numSurface = 0;
+    int numTotal = 0;
+    double meanRawResidual = 0.0;
+    double rmseRawResidual = 0.0;
+    double meanGeometryReliability = 1.0;
+    double meanResidualReliability = 1.0;
+    double meanCombinedReliability = 1.0;
+    double effectiveCorrespondenceRatio = 1.0;
+    Eigen::Matrix<double, 6, 1> rawInformationEigenvalues = Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 6, 1> weightedInformationEigenvalues = Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 6, 1> covarianceDiagonal = Eigen::Matrix<double, 6, 1>::Zero();
+    double covarianceTrace = 0.0;
+    double rawConditionNumber = 0.0;
+    double weightedConditionNumber = 0.0;
+    bool covarianceValid = false;
+    bool usedFallback = false;
+    bool isDegenerate = false;
+    int lmIterations = 0;
+    double registrationRuntimeMs = 0.0;
+    double finalInformationRuntimeMs = 0.0;
 };
 
 typedef PointXYZIRPYT  PointTypePose;
@@ -108,6 +159,17 @@ public:
     pcl::PointCloud<PointType>::Ptr laserCloudOri;
     pcl::PointCloud<PointType>::Ptr coeffSel;
     std::vector<ResidualReliability> reliabilitySel;
+    bool finalCorrespondencesValid = false;
+    std::vector<FinalCorrespondence, Eigen::aligned_allocator<FinalCorrespondence>> finalCorrespondences;
+    bool lastLidarFactorCovarianceValid = false;
+    Eigen::Matrix<double, 6, 6> lastLidarFactorCovarianceLoam = Eigen::Matrix<double, 6, 6>::Identity();
+    gtsam::Matrix6 lastLidarFactorCovarianceGtsam = gtsam::Matrix6::Identity();
+    double lastLidarFactorCovarianceTimestamp = -1.0;
+    int lastLidarFactorSourceKeyframe = -1;
+    Eigen::Matrix<double, 6, 6> lastRawInformation = Eigen::Matrix<double, 6, 6>::Zero();
+    Eigen::Matrix<double, 6, 6> lastWeightedInformation = Eigen::Matrix<double, 6, 6>::Zero();
+    FactorInformationDiagnostics lastFactorInformationDiagnostics;
+    bool covarianceConversionSelfTestPassed = false;
 
     std::vector<PointType> laserCloudOriCornerVec; // corner point holder for parallel computation
     std::vector<PointType> coeffSelCornerVec;
@@ -149,11 +211,16 @@ public:
     std::ofstream trajectoryFile;
     std::ofstream tumTrajectoryFile;
     std::ofstream reliabilityDiagnosticsFile;
+    std::ofstream scanDiagnosticsFile;
+    std::ofstream keyframeDiagnosticsFile;
     bool trajectoryFileOpen = false;
     bool tumTrajectoryFileOpen = false;
     bool reliabilityDiagnosticsFileOpen = false;
+    bool scanDiagnosticsFileOpen = false;
+    bool keyframeDiagnosticsFileOpen = false;
     bool enableTrajectoryCSV = false;
     bool enableDiagnosticsCSV = false;
+    bool enablePointLevelReliabilityCSV = false;
     std::string diagnosticsOutputDir;
     std::string diagnosticsFilePrefix;
     std::string runId;
@@ -283,6 +350,8 @@ public:
 
         allocateMemory();
 
+        covarianceConversionSelfTestPassed = runCovarianceConversionSelfTest();
+
         initialiseLoggers();
     }
 
@@ -290,6 +359,7 @@ public:
     {
         enableTrajectoryCSV = declare_parameter<bool>("enableTrajectoryCSV", false);
         enableDiagnosticsCSV = declare_parameter<bool>("enableDiagnosticsCSV", false);
+        enablePointLevelReliabilityCSV = declare_parameter<bool>("enablePointLevelReliabilityCSV", false);
         diagnosticsOutputDir = declare_parameter<std::string>(
             "diagnosticsOutputDir", "/home/unitree/ros2_workspaces/lio_ws/lio_sam_logs");
         diagnosticsFilePrefix = declare_parameter<std::string>("diagnosticsFilePrefix", "run");
@@ -327,7 +397,7 @@ public:
                 trajectoryFile
                     << "timestamp,x,y,z,qx,qy,qz,qw,roll,pitch,yaw,"
                     << "run_id,dataset_name,sequence_name,method_name,config_file,bag_name"
-                    << std::endl;
+                    << '\n';
                 RCLCPP_INFO(get_logger(), "Trajectory CSV opened at %s", trajectoryPath.string().c_str());
             }
             else
@@ -351,23 +421,127 @@ public:
 
         if (enableDiagnosticsCSV)
         {
-            std::filesystem::path reliabilityPath =
-                std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_reliability.csv");
-            reliabilityDiagnosticsFile.open(reliabilityPath, std::ios::out | std::ios::trunc);
-            if (reliabilityDiagnosticsFile.is_open())
+            std::filesystem::path scanPath =
+                std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_scan_diagnostics.csv");
+            scanDiagnosticsFile.open(scanPath, std::ios::out | std::ios::trunc);
+            if (scanDiagnosticsFile.is_open())
             {
-                reliabilityDiagnosticsFileOpen = true;
-                reliabilityDiagnosticsFile
-                    << "timestamp,iteration,index,feature_type,residual,robust_weight,"
-                    << "geometry_reliability,residual_reliability,reliability_weight,total_weight"
-                    << std::endl;
-                RCLCPP_INFO(get_logger(), "Reliability diagnostics CSV opened at %s", reliabilityPath.string().c_str());
+                scanDiagnosticsFileOpen = true;
+                writeAggregateDiagnosticsHeader(scanDiagnosticsFile);
+                RCLCPP_INFO(get_logger(), "Scan diagnostics CSV opened at %s", scanPath.string().c_str());
             }
             else
             {
-                RCLCPP_WARN(get_logger(), "Failed to open reliability diagnostics CSV at %s", reliabilityPath.string().c_str());
+                RCLCPP_WARN(get_logger(), "Failed to open scan diagnostics CSV at %s", scanPath.string().c_str());
+            }
+
+            std::filesystem::path keyframePath =
+                std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_keyframe_factors.csv");
+            keyframeDiagnosticsFile.open(keyframePath, std::ios::out | std::ios::trunc);
+            if (keyframeDiagnosticsFile.is_open())
+            {
+                keyframeDiagnosticsFileOpen = true;
+                writeAggregateDiagnosticsHeader(keyframeDiagnosticsFile);
+                RCLCPP_INFO(get_logger(), "Keyframe factor diagnostics CSV opened at %s", keyframePath.string().c_str());
+            }
+            else
+            {
+                RCLCPP_WARN(get_logger(), "Failed to open keyframe factor diagnostics CSV at %s", keyframePath.string().c_str());
+            }
+
+            if (enablePointLevelReliabilityCSV)
+            {
+                std::filesystem::path reliabilityPath =
+                    std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_reliability.csv");
+                reliabilityDiagnosticsFile.open(reliabilityPath, std::ios::out | std::ios::trunc);
+                if (reliabilityDiagnosticsFile.is_open())
+                {
+                    reliabilityDiagnosticsFileOpen = true;
+                    reliabilityDiagnosticsFile
+                        << "timestamp,iteration,index,feature_type,raw_residual,registration_weight,"
+                        << "geometry_reliability,residual_reliability,legacy_reliability_weight,total_solve_weight"
+                        << '\n';
+                    RCLCPP_INFO(get_logger(), "Point-level reliability CSV opened at %s", reliabilityPath.string().c_str());
+                }
+                else
+                {
+                    RCLCPP_WARN(get_logger(), "Failed to open point-level reliability CSV at %s", reliabilityPath.string().c_str());
+                }
             }
         }
+    }
+
+    void writeAggregateDiagnosticsHeader(std::ofstream& file)
+    {
+        file
+            << "timestamp,keyframe_index,registration_weight_mode,factor_covariance_mode,"
+            << "num_corner,num_surface,num_total,"
+            << "mean_abs_raw_residual,rmse_raw_residual,"
+            << "mean_geometry_reliability,mean_residual_reliability,mean_combined_reliability,"
+            << "effective_correspondence_ratio,"
+            << "raw_info_eig_0,raw_info_eig_1,raw_info_eig_2,raw_info_eig_3,raw_info_eig_4,raw_info_eig_5,"
+            << "weighted_info_eig_0,weighted_info_eig_1,weighted_info_eig_2,weighted_info_eig_3,weighted_info_eig_4,weighted_info_eig_5,"
+            << "raw_condition_number,weighted_condition_number,"
+            << "cov_0_0,cov_1_1,cov_2_2,cov_3_3,cov_4_4,cov_5_5,"
+            << "covariance_trace,covariance_valid,used_fixed_fallback,is_degenerate,"
+            << "lm_iterations,registration_runtime_ms,factor_information_runtime_ms"
+            << '\n';
+    }
+
+    void writeAggregateDiagnosticsRow(
+        std::ofstream& file,
+        int keyframeIndex,
+        const FactorInformationDiagnostics& diagnostics,
+        bool usedFixedFallback)
+    {
+        file << std::fixed << std::setprecision(9)
+             << diagnostics.timestamp << ","
+             << keyframeIndex << ","
+             << diagnostics.registrationWeightMode << ","
+             << diagnostics.factorCovarianceMode << ","
+             << diagnostics.numCorner << ","
+             << diagnostics.numSurface << ","
+             << diagnostics.numTotal << ","
+             << diagnostics.meanRawResidual << ","
+             << diagnostics.rmseRawResidual << ","
+             << diagnostics.meanGeometryReliability << ","
+             << diagnostics.meanResidualReliability << ","
+             << diagnostics.meanCombinedReliability << ","
+             << diagnostics.effectiveCorrespondenceRatio;
+
+        for (int i = 0; i < 6; ++i)
+            file << "," << diagnostics.rawInformationEigenvalues(i);
+        for (int i = 0; i < 6; ++i)
+            file << "," << diagnostics.weightedInformationEigenvalues(i);
+        file << ","
+             << diagnostics.rawConditionNumber << ","
+             << diagnostics.weightedConditionNumber;
+        for (int i = 0; i < 6; ++i)
+            file << "," << diagnostics.covarianceDiagonal(i);
+        file << ","
+             << diagnostics.covarianceTrace << ","
+             << (diagnostics.covarianceValid ? 1 : 0) << ","
+             << (usedFixedFallback ? 1 : 0) << ","
+             << (diagnostics.isDegenerate ? 1 : 0) << ","
+             << diagnostics.lmIterations << ","
+             << diagnostics.registrationRuntimeMs << ","
+             << diagnostics.finalInformationRuntimeMs
+             << '\n';
+    }
+
+    void writeScanDiagnostics(int keyframeIndex, const FactorInformationDiagnostics& diagnostics)
+    {
+        if (scanDiagnosticsFileOpen)
+            writeAggregateDiagnosticsRow(scanDiagnosticsFile, keyframeIndex, diagnostics, diagnostics.usedFallback);
+    }
+
+    void writeKeyframeFactorDiagnostics(
+        int keyframeIndex,
+        const FactorInformationDiagnostics& diagnostics,
+        bool usedFixedFallback)
+    {
+        if (keyframeDiagnosticsFileOpen)
+            writeAggregateDiagnosticsRow(keyframeDiagnosticsFile, keyframeIndex, diagnostics, usedFixedFallback);
     }
 
     std::string csvEscape(const std::string& value) const
@@ -425,7 +599,7 @@ public:
                            << csvEscape(methodName) << ","
                            << csvEscape(configFile) << ","
                            << csvEscape(bagName)
-                           << std::endl;
+                           << '\n';
         }
 
         if (tumTrajectoryFileOpen)
@@ -434,7 +608,7 @@ public:
                               << pose_in.time << " "
                               << pose_in.x << " " << pose_in.y << " " << pose_in.z << " "
                               << q.x() << " " << q.y() << " " << q.z() << " " << q.w()
-                              << std::endl;
+                              << '\n';
         }
     }
 
@@ -1187,11 +1361,19 @@ public:
         return clampReliability(std::exp(-(residual * residual) / (scale * scale)));
     }
 
-    ResidualReliability makeReliability(float geometryReliability, float residualValue, int featureType) const
+    ResidualReliability makeReliability(
+        float geometryReliability,
+        float rawResidual,
+        float scaledResidual,
+        float lioSamBaseScale,
+        int featureType) const
     {
         ResidualReliability reliability;
         reliability.geometry = clampReliability(geometryReliability);
-        reliability.residual = computeResidualReliability(residualValue);
+        reliability.residual = computeResidualReliability(rawResidual);
+        reliability.rawResidual = rawResidual;
+        reliability.scaledResidual = scaledResidual;
+        reliability.lioSamBaseScale = lioSamBaseScale;
         reliability.featureType = featureType;
 
         if (!adaptiveCovEnabled)
@@ -1221,6 +1403,193 @@ public:
             std::max(reliabilityWeightMin, 1e-6f),
             std::max(reliabilityWeightMax, std::max(reliabilityWeightMin, 1e-6f)));
         return reliability;
+    }
+
+    float computeRegistrationWeight(float rawResidual, float geometryReliability) const
+    {
+        const float geom = std::clamp(
+            geometryReliability,
+            std::max(reliabilityWeightMin, 1e-6f),
+            std::max(reliabilityWeightMax, std::max(reliabilityWeightMin, 1e-6f)));
+
+        switch (registrationWeightMode)
+        {
+            case 1:
+                return computeHuberWeight(rawResidual);
+            case 2:
+                return computeCauchyWeight(rawResidual);
+            case 3:
+                return geom * computeHuberWeight(rawResidual);
+            case 4:
+                return geom;
+            case 5:
+                return computeResidualReliability(rawResidual);
+            case 6:
+                return geom * computeResidualReliability(rawResidual);
+            default:
+                return 1.0f;
+        }
+    }
+
+    Eigen::Matrix<double, 1, 6> computeBaseJacobianRow(const PointType& pointOriLidar, const PointType& coeffLidar) const
+    {
+        const double srx = sin(transformTobeMapped[1]);
+        const double crx = cos(transformTobeMapped[1]);
+        const double sry = sin(transformTobeMapped[2]);
+        const double cry = cos(transformTobeMapped[2]);
+        const double srz = sin(transformTobeMapped[0]);
+        const double crz = cos(transformTobeMapped[0]);
+
+        PointType pointOri, coeff;
+        pointOri.x = pointOriLidar.y;
+        pointOri.y = pointOriLidar.z;
+        pointOri.z = pointOriLidar.x;
+        coeff.x = coeffLidar.y;
+        coeff.y = coeffLidar.z;
+        coeff.z = coeffLidar.x;
+
+        const double arx = (crx*sry*srz*pointOri.x + crx*crz*sry*pointOri.y - srx*sry*pointOri.z) * coeff.x
+                         + (-srx*srz*pointOri.x - crz*srx*pointOri.y - crx*pointOri.z) * coeff.y
+                         + (crx*cry*srz*pointOri.x + crx*cry*crz*pointOri.y - cry*srx*pointOri.z) * coeff.z;
+
+        const double ary = ((cry*srx*srz - crz*sry)*pointOri.x
+                         + (sry*srz + cry*crz*srx)*pointOri.y + crx*cry*pointOri.z) * coeff.x
+                         + ((-cry*crz - srx*sry*srz)*pointOri.x
+                         + (cry*srz - crz*srx*sry)*pointOri.y - crx*sry*pointOri.z) * coeff.z;
+
+        const double arz = ((crz*srx*sry - cry*srz)*pointOri.x + (-cry*crz-srx*sry*srz)*pointOri.y)*coeff.x
+                         + (crx*crz*pointOri.x - crx*srz*pointOri.y) * coeff.y
+                         + ((sry*srz + cry*crz*srx)*pointOri.x + (crz*sry-cry*srx*srz)*pointOri.y)*coeff.z;
+
+        Eigen::Matrix<double, 1, 6> row;
+        // Same LOAM/LIO-SAM row ordering as matA; includes the original LIO-SAM scale s through coeffLidar.
+        row << arz, arx, ary, coeff.z, coeff.x, coeff.y;
+        return row;
+    }
+
+    void addFinalCorrespondence(const PointType& pointOri, const PointType& coeff, const ResidualReliability& reliability)
+    {
+        FinalCorrespondence correspondence;
+        correspondence.type = reliability.featureType == 1
+            ? FinalCorrespondence::FeatureType::Corner
+            : FinalCorrespondence::FeatureType::Surface;
+        correspondence.rawResidual = reliability.rawResidual;
+        correspondence.lioSamBaseScale = reliability.lioSamBaseScale;
+        correspondence.baseJacobian = computeBaseJacobianRow(pointOri, coeff);
+        correspondence.geometryReliability = reliability.geometry;
+        correspondence.residualReliability = reliability.residual;
+        finalCorrespondences.push_back(correspondence);
+    }
+
+    bool matrixFinite(const Eigen::Matrix<double, 6, 6>& matrix) const
+    {
+        return matrix.allFinite();
+    }
+
+    Eigen::Matrix<double, 6, 6> fixedOdometryCovarianceLoam() const
+    {
+        Eigen::Matrix<double, 6, 6> covariance = Eigen::Matrix<double, 6, 6>::Zero();
+        covariance.diagonal() << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4;
+        return covariance;
+    }
+
+    Eigen::Matrix<double, 6, 6> loamToGtsamTangentPermutation() const
+    {
+        Eigen::Matrix<double, 6, 6> permutation = Eigen::Matrix<double, 6, 6>::Identity();
+        return permutation;
+    }
+
+    gtsam::Matrix6 convertLoamCovarianceToGtsam(const Eigen::Matrix<double, 6, 6>& covarianceLoam) const
+    {
+        const Eigen::Matrix<double, 6, 6> permutation = loamToGtsamTangentPermutation();
+        Eigen::Matrix<double, 6, 6> covarianceGtsam = permutation * covarianceLoam * permutation.transpose();
+        covarianceGtsam = 0.5 * (covarianceGtsam + covarianceGtsam.transpose());
+        return covarianceGtsam;
+    }
+
+    void setFixedLidarFactorCovarianceFallback()
+    {
+        lastLidarFactorCovarianceLoam = fixedOdometryCovarianceLoam();
+        lastLidarFactorCovarianceGtsam = convertLoamCovarianceToGtsam(lastLidarFactorCovarianceLoam);
+    }
+
+    void invalidateLidarFactorCovariance()
+    {
+        lastLidarFactorCovarianceValid = false;
+        lastLidarFactorCovarianceTimestamp = -1.0;
+        lastLidarFactorSourceKeyframe = -1;
+    }
+
+    bool runCovarianceConversionSelfTest()
+    {
+        Eigen::Matrix<double, 6, 6> covarianceLoam = Eigen::Matrix<double, 6, 6>::Zero();
+        covarianceLoam.diagonal() << 1.0, 2.0, 3.0, 4.0, 5.0, 6.0;
+
+        const Eigen::Matrix<double, 6, 6> covarianceGtsam = convertLoamCovarianceToGtsam(covarianceLoam);
+        const bool passed = (covarianceGtsam - covarianceLoam).cwiseAbs().maxCoeff() < 1e-12;
+
+        if (passed)
+        {
+            RCLCPP_INFO(
+                get_logger(),
+                "Covariance conversion self-test passed: LOAM [roll,pitch,yaw,x,y,z] -> "
+                "GTSAM [Rx,Ry,Rz,Tx,Ty,Tz] uses identity permutation.");
+        }
+        else
+        {
+            RCLCPP_ERROR(
+                get_logger(),
+                "Covariance conversion self-test failed; adaptive LiDAR factor covariance will fall back to fixed covariance.");
+        }
+
+        return passed;
+    }
+
+    double computeFactorWeight(const FinalCorrespondence& correspondence) const
+    {
+        double weight = 1.0;
+
+        switch (factorCovarianceMode)
+        {
+            case 1:
+                weight = 1.0;
+                break;
+            case 2:
+                weight = correspondence.residualReliability;
+                break;
+            case 3:
+                weight = correspondence.geometryReliability;
+                break;
+            case 4:
+                weight = correspondence.geometryReliability * correspondence.residualReliability;
+                break;
+            case 5:
+                weight = computeRegistrationWeight(correspondence.rawResidual, correspondence.geometryReliability);
+                break;
+            default:
+                weight = 1.0;
+                break;
+        }
+
+        return std::clamp(
+            weight,
+            std::max((double)reliabilityWeightMin, 1e-12),
+            std::max((double)reliabilityWeightMax, std::max((double)reliabilityWeightMin, 1e-12)));
+    }
+
+    double conditionNumberFromEigenvalues(const Eigen::Matrix<double, 6, 1>& eigenvalues) const
+    {
+        const double minEigen = std::max(eigenvalues.minCoeff(), 1e-12);
+        const double maxEigen = std::max(eigenvalues.maxCoeff(), minEigen);
+        return maxEigen / minEigen;
+    }
+
+    Eigen::Matrix<double, 6, 1> sortedSelfAdjointEigenvalues(const Eigen::Matrix<double, 6, 6>& matrix) const
+    {
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(0.5 * (matrix + matrix.transpose()));
+        if (solver.info() != Eigen::Success)
+            return Eigen::Matrix<double, 6, 1>::Zero();
+        return solver.eigenvalues();
     }
 
     void cornerOptimization()
@@ -1310,7 +1679,9 @@ public:
                         coeffSelCornerVec[i] = coeff;
                         reliabilityCornerVec[i] = makeReliability(
                             computeCornerGeometryReliability(matD1.at<float>(0, 0), matD1.at<float>(0, 1)),
+                            ld2,
                             coeff.intensity,
+                            s,
                             1);
                         laserCloudOriCornerFlag[i] = true;
                     }
@@ -1388,7 +1759,9 @@ public:
                         coeffSelSurfVec[i] = coeff;
                         reliabilitySurfVec[i] = makeReliability(
                             computeSurfGeometryReliability(maxPlaneDistance),
+                            pd2,
                             coeff.intensity,
+                            s,
                             2);
                         laserCloudOriSurfFlag[i] = true;
                     }
@@ -1420,6 +1793,362 @@ public:
         std::fill(laserCloudOriSurfFlag.begin(), laserCloudOriSurfFlag.end(), false);
     }
 
+    bool computeFinalCorrespondencesAtConvergedPose()
+    {
+        updatePointAssociateToMap();
+        finalCorrespondences.clear();
+        finalCorrespondences.reserve(laserCloudCornerLastDSNum + laserCloudSurfLastDSNum);
+
+        for (int i = 0; i < laserCloudCornerLastDSNum; i++)
+        {
+            PointType pointOri, pointSel, coeff;
+            std::vector<int> pointSearchInd;
+            std::vector<float> pointSearchSqDis;
+
+            pointOri = laserCloudCornerLastDS->points[i];
+            pointAssociateToMap(&pointOri, &pointSel);
+            if (kdtreeCornerFromMap->nearestKSearch(pointSel, 5, pointSearchInd, pointSearchSqDis) < 5)
+                continue;
+
+            cv::Mat matA1(3, 3, CV_32F, cv::Scalar::all(0));
+            cv::Mat matD1(1, 3, CV_32F, cv::Scalar::all(0));
+            cv::Mat matV1(3, 3, CV_32F, cv::Scalar::all(0));
+
+            if (pointSearchSqDis[4] < 1.0) {
+                float cx = 0, cy = 0, cz = 0;
+                for (int j = 0; j < 5; j++) {
+                    cx += laserCloudCornerFromMapDS->points[pointSearchInd[j]].x;
+                    cy += laserCloudCornerFromMapDS->points[pointSearchInd[j]].y;
+                    cz += laserCloudCornerFromMapDS->points[pointSearchInd[j]].z;
+                }
+                cx /= 5; cy /= 5; cz /= 5;
+
+                float a11 = 0, a12 = 0, a13 = 0, a22 = 0, a23 = 0, a33 = 0;
+                for (int j = 0; j < 5; j++) {
+                    float ax = laserCloudCornerFromMapDS->points[pointSearchInd[j]].x - cx;
+                    float ay = laserCloudCornerFromMapDS->points[pointSearchInd[j]].y - cy;
+                    float az = laserCloudCornerFromMapDS->points[pointSearchInd[j]].z - cz;
+
+                    a11 += ax * ax; a12 += ax * ay; a13 += ax * az;
+                    a22 += ay * ay; a23 += ay * az;
+                    a33 += az * az;
+                }
+                a11 /= 5; a12 /= 5; a13 /= 5; a22 /= 5; a23 /= 5; a33 /= 5;
+
+                matA1.at<float>(0, 0) = a11; matA1.at<float>(0, 1) = a12; matA1.at<float>(0, 2) = a13;
+                matA1.at<float>(1, 0) = a12; matA1.at<float>(1, 1) = a22; matA1.at<float>(1, 2) = a23;
+                matA1.at<float>(2, 0) = a13; matA1.at<float>(2, 1) = a23; matA1.at<float>(2, 2) = a33;
+
+                cv::eigen(matA1, matD1, matV1);
+
+                if (matD1.at<float>(0, 0) > 3 * matD1.at<float>(0, 1)) {
+                    float x0 = pointSel.x;
+                    float y0 = pointSel.y;
+                    float z0 = pointSel.z;
+                    float x1 = cx + 0.1 * matV1.at<float>(0, 0);
+                    float y1 = cy + 0.1 * matV1.at<float>(0, 1);
+                    float z1 = cz + 0.1 * matV1.at<float>(0, 2);
+                    float x2 = cx - 0.1 * matV1.at<float>(0, 0);
+                    float y2 = cy - 0.1 * matV1.at<float>(0, 1);
+                    float z2 = cz - 0.1 * matV1.at<float>(0, 2);
+
+                    float a012 = sqrt(((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) * ((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1))
+                                    + ((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1)) * ((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1))
+                                    + ((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1)) * ((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1)));
+
+                    float l12 = sqrt((x1 - x2)*(x1 - x2) + (y1 - y2)*(y1 - y2) + (z1 - z2)*(z1 - z2));
+
+                    float la = ((y1 - y2)*((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1))
+                              + (z1 - z2)*((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1))) / a012 / l12;
+
+                    float lb = -((x1 - x2)*((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1))
+                               - (z1 - z2)*((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1))) / a012 / l12;
+
+                    float lc = -((x1 - x2)*((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1))
+                               + (y1 - y2)*((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1))) / a012 / l12;
+
+                    float ld2 = a012 / l12;
+                    float s = 1 - 0.9 * fabs(ld2);
+
+                    coeff.x = s * la;
+                    coeff.y = s * lb;
+                    coeff.z = s * lc;
+                    coeff.intensity = s * ld2;
+
+                    if (s > 0.1) {
+                        ResidualReliability reliability = makeReliability(
+                            computeCornerGeometryReliability(matD1.at<float>(0, 0), matD1.at<float>(0, 1)),
+                            ld2,
+                            coeff.intensity,
+                            s,
+                            1);
+                        addFinalCorrespondence(pointOri, coeff, reliability);
+                    }
+                }
+            }
+        }
+
+        for (int i = 0; i < laserCloudSurfLastDSNum; i++)
+        {
+            PointType pointOri, pointSel, coeff;
+            std::vector<int> pointSearchInd;
+            std::vector<float> pointSearchSqDis;
+
+            pointOri = laserCloudSurfLastDS->points[i];
+            pointAssociateToMap(&pointOri, &pointSel);
+            if (kdtreeSurfFromMap->nearestKSearch(pointSel, 5, pointSearchInd, pointSearchSqDis) < 5)
+                continue;
+
+            Eigen::Matrix<float, 5, 3> matA0;
+            Eigen::Matrix<float, 5, 1> matB0;
+            Eigen::Vector3f matX0;
+
+            matA0.setZero();
+            matB0.fill(-1);
+            matX0.setZero();
+
+            if (pointSearchSqDis[4] < 1.0) {
+                for (int j = 0; j < 5; j++) {
+                    matA0(j, 0) = laserCloudSurfFromMapDS->points[pointSearchInd[j]].x;
+                    matA0(j, 1) = laserCloudSurfFromMapDS->points[pointSearchInd[j]].y;
+                    matA0(j, 2) = laserCloudSurfFromMapDS->points[pointSearchInd[j]].z;
+                }
+
+                matX0 = matA0.colPivHouseholderQr().solve(matB0);
+
+                float pa = matX0(0, 0);
+                float pb = matX0(1, 0);
+                float pc = matX0(2, 0);
+                float pd = 1;
+
+                float ps = sqrt(pa * pa + pb * pb + pc * pc);
+                pa /= ps; pb /= ps; pc /= ps; pd /= ps;
+
+                bool planeValid = true;
+                float maxPlaneDistance = 0.0f;
+                for (int j = 0; j < 5; j++) {
+                    const float planeDistance = fabs(pa * laserCloudSurfFromMapDS->points[pointSearchInd[j]].x +
+                                                      pb * laserCloudSurfFromMapDS->points[pointSearchInd[j]].y +
+                                                      pc * laserCloudSurfFromMapDS->points[pointSearchInd[j]].z + pd);
+                    maxPlaneDistance = std::max(maxPlaneDistance, planeDistance);
+                    if (planeDistance > 0.2) {
+                        planeValid = false;
+                        break;
+                    }
+                }
+
+                if (planeValid) {
+                    float pd2 = pa * pointSel.x + pb * pointSel.y + pc * pointSel.z + pd;
+                    float s = 1 - 0.9 * fabs(pd2) / sqrt(sqrt(pointOri.x * pointOri.x
+                            + pointOri.y * pointOri.y + pointOri.z * pointOri.z));
+
+                    coeff.x = s * pa;
+                    coeff.y = s * pb;
+                    coeff.z = s * pc;
+                    coeff.intensity = s * pd2;
+
+                    if (s > 0.1) {
+                        ResidualReliability reliability = makeReliability(
+                            computeSurfGeometryReliability(maxPlaneDistance),
+                            pd2,
+                            coeff.intensity,
+                            s,
+                            2);
+                        addFinalCorrespondence(pointOri, coeff, reliability);
+                    }
+                }
+            }
+        }
+
+        return (int)finalCorrespondences.size() >= factorCovarianceMinCorrespondences;
+    }
+
+    bool computeLidarFactorInformationAndCovariance(FactorInformationDiagnostics* diagnostics)
+    {
+        invalidateLidarFactorCovariance();
+        lastRawInformation.setZero();
+        lastWeightedInformation.setZero();
+
+        FactorInformationDiagnostics localDiagnostics;
+        localDiagnostics.timestamp = timeLaserInfoCur;
+        localDiagnostics.registrationWeightMode = registrationWeightMode;
+        localDiagnostics.factorCovarianceMode = factorCovarianceMode;
+
+        if (factorCovarianceMode == 0)
+        {
+            lastFactorInformationDiagnostics = localDiagnostics;
+            if (diagnostics)
+                *diagnostics = localDiagnostics;
+            return false;
+        }
+
+        if (!covarianceConversionSelfTestPassed)
+        {
+            localDiagnostics.usedFallback = factorCovarianceFallbackToFixed;
+            if (factorCovarianceFallbackToFixed)
+                setFixedLidarFactorCovarianceFallback();
+            lastFactorInformationDiagnostics = localDiagnostics;
+            if (diagnostics)
+                *diagnostics = localDiagnostics;
+            return false;
+        }
+
+        if (!finalCorrespondencesValid || (int)finalCorrespondences.size() < factorCovarianceMinCorrespondences)
+        {
+            localDiagnostics.numTotal = finalCorrespondences.size();
+            localDiagnostics.usedFallback = factorCovarianceFallbackToFixed;
+            if (factorCovarianceFallbackToFixed)
+                setFixedLidarFactorCovarianceFallback();
+            lastFactorInformationDiagnostics = localDiagnostics;
+            if (diagnostics)
+                *diagnostics = localDiagnostics;
+            return false;
+        }
+
+        double absResidualSum = 0.0;
+        double residualSquareSum = 0.0;
+        double geometryReliabilitySum = 0.0;
+        double residualReliabilitySum = 0.0;
+        double combinedReliabilitySum = 0.0;
+        double selectedWeightSum = 0.0;
+
+        for (const auto& correspondence : finalCorrespondences)
+        {
+            if (correspondence.type == FinalCorrespondence::FeatureType::Corner)
+                localDiagnostics.numCorner++;
+            else
+                localDiagnostics.numSurface++;
+
+            const Eigen::Matrix<double, 6, 1> jacobianT = correspondence.baseJacobian.transpose();
+            const Eigen::Matrix<double, 6, 6> contribution = jacobianT * correspondence.baseJacobian;
+            const double factorWeight = computeFactorWeight(correspondence);
+
+            lastRawInformation += contribution;
+            lastWeightedInformation += factorWeight * contribution;
+
+            absResidualSum += std::abs(correspondence.rawResidual);
+            residualSquareSum += correspondence.rawResidual * correspondence.rawResidual;
+            geometryReliabilitySum += correspondence.geometryReliability;
+            residualReliabilitySum += correspondence.residualReliability;
+            combinedReliabilitySum += correspondence.geometryReliability * correspondence.residualReliability;
+            selectedWeightSum += factorWeight;
+        }
+
+        localDiagnostics.numTotal = finalCorrespondences.size();
+        const double correspondenceCount = std::max(1, localDiagnostics.numTotal);
+        localDiagnostics.meanRawResidual = absResidualSum / correspondenceCount;
+        localDiagnostics.rmseRawResidual = std::sqrt(residualSquareSum / correspondenceCount);
+        localDiagnostics.meanGeometryReliability = geometryReliabilitySum / correspondenceCount;
+        localDiagnostics.meanResidualReliability = residualReliabilitySum / correspondenceCount;
+        localDiagnostics.meanCombinedReliability = combinedReliabilitySum / correspondenceCount;
+        localDiagnostics.effectiveCorrespondenceRatio = selectedWeightSum / correspondenceCount;
+
+        lastRawInformation = 0.5 * (lastRawInformation + lastRawInformation.transpose());
+        lastWeightedInformation = 0.5 * (lastWeightedInformation + lastWeightedInformation.transpose());
+        localDiagnostics.rawInformationEigenvalues = sortedSelfAdjointEigenvalues(lastRawInformation);
+        localDiagnostics.weightedInformationEigenvalues = sortedSelfAdjointEigenvalues(lastWeightedInformation);
+        localDiagnostics.rawConditionNumber = conditionNumberFromEigenvalues(localDiagnostics.rawInformationEigenvalues);
+        localDiagnostics.weightedConditionNumber = conditionNumberFromEigenvalues(localDiagnostics.weightedInformationEigenvalues);
+
+        if (!matrixFinite(lastWeightedInformation))
+        {
+            localDiagnostics.usedFallback = factorCovarianceFallbackToFixed;
+            if (factorCovarianceFallbackToFixed)
+                setFixedLidarFactorCovarianceFallback();
+            lastFactorInformationDiagnostics = localDiagnostics;
+            if (diagnostics)
+                *diagnostics = localDiagnostics;
+            return false;
+        }
+
+        Eigen::Matrix<double, 6, 6> information =
+            lastWeightedInformation / std::max(factorNominalResidualSigma * factorNominalResidualSigma, 1e-12);
+        information = 0.5 * (information + information.transpose());
+
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> informationSolver(information);
+        if (informationSolver.info() != Eigen::Success)
+        {
+            localDiagnostics.usedFallback = factorCovarianceFallbackToFixed;
+            if (factorCovarianceFallbackToFixed)
+                setFixedLidarFactorCovarianceFallback();
+            lastFactorInformationDiagnostics = localDiagnostics;
+            if (diagnostics)
+                *diagnostics = localDiagnostics;
+            return false;
+        }
+
+        Eigen::Matrix<double, 6, 1> informationEigenvalues = informationSolver.eigenvalues();
+        const double infoMin = std::max(factorInformationEigenvalueMin, 1e-12);
+        const double infoMax = std::max(factorInformationEigenvalueMax, infoMin);
+        const double damping = std::max(factorInformationDamping, 0.0);
+        for (int i = 0; i < 6; ++i)
+            informationEigenvalues(i) = std::clamp(informationEigenvalues(i), infoMin, infoMax) + damping;
+
+        Eigen::Matrix<double, 6, 1> covarianceEigenvalues;
+        for (int i = 0; i < 6; ++i)
+            covarianceEigenvalues(i) = 1.0 / informationEigenvalues(i);
+
+        const double covMin = std::max(factorCovarianceEigenvalueMin, 1e-12);
+        const double covMax = std::max(factorCovarianceEigenvalueMax, covMin);
+        for (int i = 0; i < 6; ++i)
+            covarianceEigenvalues(i) = std::clamp(covarianceEigenvalues(i), covMin, covMax);
+
+        Eigen::Matrix<double, 6, 6> covariance =
+            informationSolver.eigenvectors() * covarianceEigenvalues.asDiagonal() * informationSolver.eigenvectors().transpose();
+        covariance = 0.5 * (covariance + covariance.transpose());
+
+        if (!factorCovarianceUseFullMatrix)
+            covariance = covariance.diagonal().asDiagonal();
+
+        if (!matrixFinite(covariance))
+        {
+            localDiagnostics.usedFallback = factorCovarianceFallbackToFixed;
+            if (factorCovarianceFallbackToFixed)
+                setFixedLidarFactorCovarianceFallback();
+            lastFactorInformationDiagnostics = localDiagnostics;
+            if (diagnostics)
+                *diagnostics = localDiagnostics;
+            return false;
+        }
+
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> covarianceSolver(covariance);
+        if (covarianceSolver.info() != Eigen::Success || covarianceSolver.eigenvalues().minCoeff() <= 0.0)
+        {
+            localDiagnostics.usedFallback = factorCovarianceFallbackToFixed;
+            if (factorCovarianceFallbackToFixed)
+                setFixedLidarFactorCovarianceFallback();
+            lastFactorInformationDiagnostics = localDiagnostics;
+            if (diagnostics)
+                *diagnostics = localDiagnostics;
+            return false;
+        }
+
+        lastLidarFactorCovarianceLoam = covariance;
+        lastLidarFactorCovarianceGtsam = convertLoamCovarianceToGtsam(lastLidarFactorCovarianceLoam);
+        if (!matrixFinite(lastLidarFactorCovarianceGtsam))
+        {
+            localDiagnostics.usedFallback = factorCovarianceFallbackToFixed;
+            if (factorCovarianceFallbackToFixed)
+                setFixedLidarFactorCovarianceFallback();
+            lastFactorInformationDiagnostics = localDiagnostics;
+            if (diagnostics)
+                *diagnostics = localDiagnostics;
+            return false;
+        }
+
+        lastLidarFactorCovarianceValid = true;
+        lastLidarFactorCovarianceTimestamp = timeLaserInfoCur;
+        lastLidarFactorSourceKeyframe = cloudKeyPoses3D->size();
+        localDiagnostics.covarianceValid = true;
+        localDiagnostics.covarianceDiagonal = covariance.diagonal();
+        localDiagnostics.covarianceTrace = covariance.trace();
+
+        lastFactorInformationDiagnostics = localDiagnostics;
+        if (diagnostics)
+            *diagnostics = localDiagnostics;
+        return true;
+    }
+
     bool LMOptimization(int iterCount)
     {
         // This optimization is from the original loam_velodyne by Ji Zhang, need to cope with coordinate transformation
@@ -1445,8 +2174,11 @@ public:
         }
 
         cv::Mat matA(laserCloudSelNum, 6, CV_32F, cv::Scalar::all(0));
+        cv::Mat matAForDegeneracy(laserCloudSelNum, 6, CV_32F, cv::Scalar::all(0));
         cv::Mat matAt(6, laserCloudSelNum, CV_32F, cv::Scalar::all(0));
         cv::Mat matAtA(6, 6, CV_32F, cv::Scalar::all(0));
+        cv::Mat matAtDegeneracy(6, laserCloudSelNum, CV_32F, cv::Scalar::all(0));
+        cv::Mat matAtADegeneracy(6, 6, CV_32F, cv::Scalar::all(0));
         cv::Mat matB(laserCloudSelNum, 1, CV_32F, cv::Scalar::all(0));
         cv::Mat matAtB(6, 1, CV_32F, cv::Scalar::all(0));
         cv::Mat matX(6, 1, CV_32F, cv::Scalar::all(0));
@@ -1479,15 +2211,20 @@ public:
                       + ((sry*srz + cry*crz*srx)*pointOri.x + (crz*sry-cry*srx*srz)*pointOri.y)*coeff.z;
             const ResidualReliability reliability =
                 i < (int)reliabilitySel.size() ? reliabilitySel[i] : ResidualReliability();
-            const float robustWeight = computeRobustWeight(coeff.intensity);
-            const float reliabilityWeight = adaptiveCovEnabled ? reliability.weight : 1.0f;
-            const float totalWeight = std::max(robustWeight * reliabilityWeight, 1e-3f);
+            const float registrationWeight = computeRegistrationWeight(reliability.rawResidual, reliability.geometry);
+            const float totalWeight = std::max(registrationWeight, 1e-3f);
             const float sqrtWeight = std::sqrt(totalWeight);
 
             writeReliabilityDiagnostics(
-                iterCount, i, reliability, coeff.intensity, robustWeight, reliabilityWeight, totalWeight);
+                iterCount, i, reliability, reliability.rawResidual, registrationWeight, reliability.weight, totalWeight);
 
             // lidar -> camera
+            matAForDegeneracy.at<float>(i, 0) = arz;
+            matAForDegeneracy.at<float>(i, 1) = arx;
+            matAForDegeneracy.at<float>(i, 2) = ary;
+            matAForDegeneracy.at<float>(i, 3) = coeff.z;
+            matAForDegeneracy.at<float>(i, 4) = coeff.x;
+            matAForDegeneracy.at<float>(i, 5) = coeff.y;
             matA.at<float>(i, 0) = sqrtWeight * arz;
             matA.at<float>(i, 1) = sqrtWeight * arx;
             matA.at<float>(i, 2) = sqrtWeight * ary;
@@ -1508,7 +2245,16 @@ public:
             cv::Mat matV(6, 6, CV_32F, cv::Scalar::all(0));
             cv::Mat matV2(6, 6, CV_32F, cv::Scalar::all(0));
 
-            cv::eigen(matAtA, matE, matV);
+            if (degeneracyHessianMode == 0)
+            {
+                cv::transpose(matAForDegeneracy, matAtDegeneracy);
+                matAtADegeneracy = matAtDegeneracy * matAForDegeneracy;
+                cv::eigen(matAtADegeneracy, matE, matV);
+            }
+            else
+            {
+                cv::eigen(matAtA, matE, matV);
+            }
             matV.copyTo(matV2);
 
             isDegenerate = false;
@@ -1565,6 +2311,8 @@ public:
             kdtreeCornerFromMap->setInputCloud(laserCloudCornerFromMapDS);
             kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
 
+            const auto registrationStart = std::chrono::steady_clock::now();
+            int lmIterations = 0;
             for (int iterCount = 0; iterCount < 30; iterCount++)
             {
                 laserCloudOri->clear();
@@ -1576,12 +2324,46 @@ public:
 
                 combineOptimizationCoeffs();
 
+                lmIterations = iterCount + 1;
                 if (LMOptimization(iterCount) == true)
                     break;              
             }
+            const auto registrationEnd = std::chrono::steady_clock::now();
+
+            const auto informationStart = std::chrono::steady_clock::now();
+            finalCorrespondencesValid = computeFinalCorrespondencesAtConvergedPose();
+            if (!finalCorrespondencesValid)
+            {
+                RCLCPP_DEBUG(
+                    get_logger(),
+                    "Final correspondence pass found %zu correspondences, below minimum %d.",
+                    finalCorrespondences.size(),
+                    factorCovarianceMinCorrespondences);
+            }
+            computeLidarFactorInformationAndCovariance(&lastFactorInformationDiagnostics);
+            const auto informationEnd = std::chrono::steady_clock::now();
+            lastFactorInformationDiagnostics.lmIterations = lmIterations;
+            lastFactorInformationDiagnostics.isDegenerate = isDegenerate;
+            lastFactorInformationDiagnostics.registrationRuntimeMs =
+                std::chrono::duration<double, std::milli>(registrationEnd - registrationStart).count();
+            lastFactorInformationDiagnostics.finalInformationRuntimeMs =
+                std::chrono::duration<double, std::milli>(informationEnd - informationStart).count();
+            writeScanDiagnostics(cloudKeyPoses3D->size(), lastFactorInformationDiagnostics);
 
             transformUpdate();
         } else {
+            finalCorrespondences.clear();
+            finalCorrespondencesValid = false;
+            invalidateLidarFactorCovariance();
+            FactorInformationDiagnostics diagnostics;
+            diagnostics.timestamp = timeLaserInfoCur;
+            diagnostics.registrationWeightMode = registrationWeightMode;
+            diagnostics.factorCovarianceMode = factorCovarianceMode;
+            diagnostics.numCorner = laserCloudCornerLastDSNum;
+            diagnostics.numSurface = laserCloudSurfLastDSNum;
+            diagnostics.isDegenerate = isDegenerate;
+            lastFactorInformationDiagnostics = diagnostics;
+            writeScanDiagnostics(cloudKeyPoses3D->size(), lastFactorInformationDiagnostics);
             RCLCPP_WARN(get_logger(), "Not enough features! Only %d edge and %d planar features available.", laserCloudCornerLastDSNum, laserCloudSurfLastDSNum);
         }
     }
@@ -1655,25 +2437,32 @@ public:
                                    << reliability.residual << ","
                                    << reliabilityWeight << ","
                                    << totalWeight
-                                   << std::endl;
+                                   << '\n';
     }
 
-    float computeRobustWeight(float residual)
+    float computeHuberWeight(float residual) const
     {
         const float abs_r = std::fabs(residual);
+        if (abs_r <= huberDelta)
+            return 1.0f;
+        return huberDelta / std::max(abs_r, 1e-6f);
+    }
 
+    float computeCauchyWeight(float residual) const
+    {
+        const float c = std::max(cauchyC, 1e-6f);
+        const float r_over_c = residual / c;
+        return 1.0f / (1.0f + r_over_c * r_over_c);
+    }
+
+    float computeRobustWeight(float residual) const
+    {
         switch (robustKernelType)
         {
             case 1:
-                if (abs_r <= huberDelta)
-                    return 1.0f;
-                return huberDelta / std::max(abs_r, 1e-6f);
+                return computeHuberWeight(residual);
             case 2:
-            {
-                const float c = std::max(cauchyC, 1e-6f);
-                const float r_over_c = residual / c;
-                return 1.0f / (1.0f + r_over_c * r_over_c);
-            }
+                return computeCauchyWeight(residual);
             default:
                 return 1.0f;
         }
@@ -1714,12 +2503,35 @@ public:
             gtSAMgraph.add(PriorFactor<Pose3>(0, trans2gtsamPose(transformTobeMapped), priorNoise));
             initialEstimate.insert(0, trans2gtsamPose(transformTobeMapped));
         }else{
-            noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
+            const int targetKeyframeIndex = cloudKeyPoses3D->size();
+            const bool covarianceMatchesCurrentScan =
+                std::abs(lastLidarFactorCovarianceTimestamp - timeLaserInfoCur) < 1e-6 &&
+                lastLidarFactorSourceKeyframe == targetKeyframeIndex;
+            const bool useAdaptiveCovariance =
+                factorCovarianceMode != 0 &&
+                lastLidarFactorCovarianceValid &&
+                covarianceMatchesCurrentScan &&
+                matrixFinite(lastLidarFactorCovarianceGtsam);
+
+            gtsam::SharedNoiseModel odometryNoise;
+            if (useAdaptiveCovariance)
+            {
+                odometryNoise = noiseModel::Gaussian::Covariance(lastLidarFactorCovarianceGtsam);
+            }
+            else
+            {
+                odometryNoise = noiseModel::Diagonal::Variances(
+                    (Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
+            }
+
             gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
             gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
             gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
             initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
+            writeKeyframeFactorDiagnostics(targetKeyframeIndex, lastFactorInformationDiagnostics, !useAdaptiveCovariance);
         }
+
+        invalidateLidarFactorCovariance();
     }
 
     void addGPSFactor()
@@ -1824,7 +2636,10 @@ public:
     void saveKeyFramesAndFactor()
     {
         if (saveFrame() == false)
+        {
+            invalidateLidarFactorCovariance();
             return;
+        }
 
         // odom factor
         addOdomFactor();

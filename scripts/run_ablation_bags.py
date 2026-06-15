@@ -2,9 +2,11 @@
 """
 Run LIO-SAM ablation methods over a ROS 2 bag with generated per-method YAMLs.
 
-The fixed, Huber, Cauchy, geometry-only, residual-only, and reliability-aware
-methods are active in LIO-SAM. Each run gets a generated YAML config and its own
-diagnostic/trajectory output directory.
+Phase 5-7 separates registration/factor-covariance mode parameters, stores final
+converged-pose correspondences, and builds internal adaptive covariance
+matrices. Adaptive factor covariance is now inserted into GTSAM when the
+selected method enables it and the per-scan covariance passes consistency
+checks.
 """
 
 from __future__ import annotations
@@ -26,6 +28,9 @@ import yaml
 METHODS: Dict[str, Dict[str, object]] = {
     "fixed": {
         "viEnabled": False,
+        "registrationWeightMode": 0,
+        "factorCovarianceMode": 0,
+        "degeneracyHessianMode": 0,
         "robustKernelType": 0,
         "adaptiveCovEnabled": False,
         "adaptiveCovMode": 0,
@@ -34,7 +39,10 @@ METHODS: Dict[str, Dict[str, object]] = {
     },
     "huber": {
         "viEnabled": False,
-        "robustKernelType": 1,
+        "registrationWeightMode": 1,
+        "factorCovarianceMode": 0,
+        "degeneracyHessianMode": 0,
+        "robustKernelType": 0,
         "huberDelta": 0.1,
         "adaptiveCovEnabled": False,
         "adaptiveCovMode": 0,
@@ -43,7 +51,10 @@ METHODS: Dict[str, Dict[str, object]] = {
     },
     "cauchy": {
         "viEnabled": False,
-        "robustKernelType": 2,
+        "registrationWeightMode": 2,
+        "factorCovarianceMode": 0,
+        "degeneracyHessianMode": 0,
+        "robustKernelType": 0,
         "cauchyC": 0.8,
         "adaptiveCovEnabled": False,
         "adaptiveCovMode": 0,
@@ -52,25 +63,103 @@ METHODS: Dict[str, Dict[str, object]] = {
     },
     "raw_hessian": {
         "viEnabled": False,
+        "registrationWeightMode": 0,
+        "factorCovarianceMode": 1,
+        "degeneracyHessianMode": 0,
         "robustKernelType": 0,
-        "adaptiveCovEnabled": True,
-        "adaptiveCovMode": 1,
+        "adaptiveCovEnabled": False,
+        "adaptiveCovMode": 0,
         "reliabilityDiagnosticsStride": 10,
         "method_name": "raw_hessian",
     },
     "residual_only": {
         "viEnabled": False,
+        "registrationWeightMode": 0,
+        "factorCovarianceMode": 2,
+        "degeneracyHessianMode": 0,
         "robustKernelType": 0,
-        "adaptiveCovEnabled": True,
-        "adaptiveCovMode": 2,
+        "adaptiveCovEnabled": False,
+        "adaptiveCovMode": 0,
         "reliabilityDiagnosticsStride": 10,
         "method_name": "residual_only",
     },
+    "geometry_cov_only": {
+        "viEnabled": False,
+        "registrationWeightMode": 0,
+        "factorCovarianceMode": 3,
+        "degeneracyHessianMode": 0,
+        "robustKernelType": 0,
+        "adaptiveCovEnabled": False,
+        "adaptiveCovMode": 0,
+        "reliabilityDiagnosticsStride": 10,
+        "method_name": "geometry_cov_only",
+    },
+    "geometry_registration": {
+        "viEnabled": False,
+        "registrationWeightMode": 3,
+        "factorCovarianceMode": 0,
+        "degeneracyHessianMode": 0,
+        "robustKernelType": 0,
+        "huberDelta": 0.1,
+        "adaptiveCovEnabled": False,
+        "adaptiveCovMode": 0,
+        "reliabilityDiagnosticsStride": 10,
+        "method_name": "geometry_registration",
+    },
+    "post_split_only": {
+        "viEnabled": False,
+        "registrationWeightMode": 0,
+        "factorCovarianceMode": 4,
+        "degeneracyHessianMode": 0,
+        "robustKernelType": 0,
+        "adaptiveCovEnabled": False,
+        "adaptiveCovMode": 0,
+        "reliabilityDiagnosticsStride": 10,
+        "method_name": "post_split_only",
+    },
+    "proposed_split": {
+        "viEnabled": False,
+        "registrationWeightMode": 3,
+        "factorCovarianceMode": 4,
+        "degeneracyHessianMode": 0,
+        "robustKernelType": 0,
+        "huberDelta": 0.1,
+        "adaptiveCovEnabled": False,
+        "adaptiveCovMode": 0,
+        "reliabilityDiagnosticsStride": 10,
+        "method_name": "proposed_split",
+    },
+    "legacy_residual_solve": {
+        "viEnabled": False,
+        "registrationWeightMode": 5,
+        "factorCovarianceMode": 0,
+        "degeneracyHessianMode": 0,
+        "robustKernelType": 0,
+        "adaptiveCovEnabled": False,
+        "adaptiveCovMode": 0,
+        "reliabilityDiagnosticsStride": 10,
+        "method_name": "legacy_residual_solve",
+    },
+    "legacy_combined_solve": {
+        "viEnabled": False,
+        "registrationWeightMode": 6,
+        "factorCovarianceMode": 0,
+        "degeneracyHessianMode": 0,
+        "robustKernelType": 0,
+        "adaptiveCovEnabled": False,
+        "adaptiveCovMode": 0,
+        "reliabilityDiagnosticsStride": 10,
+        "method_name": "legacy_combined_solve",
+    },
     "reliability": {
         "viEnabled": False,
+        "registrationWeightMode": 3,
+        "factorCovarianceMode": 4,
+        "degeneracyHessianMode": 0,
         "robustKernelType": 0,
-        "adaptiveCovEnabled": True,
-        "adaptiveCovMode": 3,
+        "huberDelta": 0.1,
+        "adaptiveCovEnabled": False,
+        "adaptiveCovMode": 0,
         "reliabilityDiagnosticsStride": 10,
         "method_name": "reliability",
     },
@@ -182,6 +271,7 @@ def write_method_config(
             "bag_name": bag.name,
             "enableDiagnosticsCSV": True,
             "enableTrajectoryCSV": True,
+            "enablePointLevelReliabilityCSV": False,
         }
     )
 
@@ -341,7 +431,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        default=["fixed", "huber", "cauchy", "raw_hessian", "residual_only", "reliability"],
+        default=[
+            "fixed",
+            "huber",
+            "cauchy",
+            "raw_hessian",
+            "residual_only",
+            "geometry_cov_only",
+            "post_split_only",
+            "proposed_split",
+        ],
         choices=list(METHODS.keys()),
         help="Methods to run in order. Defaults to all active ablation variants.",
     )

@@ -54,11 +54,23 @@
     surfThreshold: 0.1
     edgeFeatureMinValidNum: 10
     surfFeatureMinValidNum: 100
-    robustKernelType: 0                         # 0: none/fixed, 1: Huber, 2: Cauchy
+    registrationWeightMode: 0                   # 0: original, 1: Huber, 2: Cauchy, 3: geometry+Huber, 4: geometry, 5: legacy residual, 6: legacy combined
+    factorCovarianceMode: 0                     # 0 fixed, 1 raw Hessian, 2 residual, 3 geometry, 4 split, 5 registration-weighted diagnostic
+    degeneracyHessianMode: 0                    # 0: original Hessian, 1: registration-weighted Hessian
+    factorCovarianceMinCorrespondences: 50
+    factorNominalResidualSigma: 1.0
+    factorInformationDamping: 1.0e-6
+    factorInformationEigenvalueMin: 1.0e-6
+    factorInformationEigenvalueMax: 1.0e9
+    factorCovarianceEigenvalueMin: 1.0e-8
+    factorCovarianceEigenvalueMax: 1.0e4
+    factorCovarianceUseFullMatrix: true
+    factorCovarianceFallbackToFixed: true
+    robustKernelType: 0                         # deprecated alias: 0 none/fixed, 1 Huber, 2 Cauchy
     huberDelta: 0.1
     cauchyC: 0.8
-    adaptiveCovEnabled: false
-    adaptiveCovMode: 0                          # 0: none, 1: geometry, 2: residual, 3: geometry*residual
+    adaptiveCovEnabled: false                   # deprecated alias for legacy in-solve reliability modes
+    adaptiveCovMode: 0                          # deprecated: 0 none, 1 geometry, 2 residual, 3 geometry*residual
     reliabilityMin: 0.05
     reliabilityResidualScale: 0.2
     reliabilityCornerRatioRef: 10.0
@@ -66,6 +78,19 @@
     reliabilityWeightMin: 0.001
     reliabilityWeightMax: 1.0
     reliabilityDiagnosticsStride: 10
+
+    # Diagnostics logging. The ablation script enables these per run.
+    enableTrajectoryCSV: false
+    enableDiagnosticsCSV: false
+    enablePointLevelReliabilityCSV: false
+    diagnosticsOutputDir: "/tmp/lio_sam_reliability"
+    diagnosticsFilePrefix: "run"
+    run_id: "run_method_seed"
+    dataset_name: "unknown"
+    sequence_name: "replace_me"
+    method_name: "fixed"
+    config_file: "params.yaml"
+    bag_name: "replace_me"
 
     # voxel filter paprams
     odometrySurfLeafSize: 0.4                     # default: 0.4 - outdoor, 0.2 - indoor

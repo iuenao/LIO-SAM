@@ -1,0 +1,11 @@
+/**:
+  ros__parameters:
+    viEnabled: false
+    registrationWeightMode: 2
+    factorCovarianceMode: 0
+    degeneracyHessianMode: 0
+    robustKernelType: 0
+    cauchyC: 0.8
+    adaptiveCovEnabled: false
+    adaptiveCovMode: 0
+    method_name: "cauchy"

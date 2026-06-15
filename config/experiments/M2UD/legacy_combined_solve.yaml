@@ -1,0 +1,10 @@
+/**:
+  ros__parameters:
+    viEnabled: false
+    registrationWeightMode: 6
+    factorCovarianceMode: 0
+    degeneracyHessianMode: 0
+    robustKernelType: 0
+    adaptiveCovEnabled: false
+    adaptiveCovMode: 0
+    method_name: "legacy_combined_solve"

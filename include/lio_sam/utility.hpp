@@ -125,12 +125,26 @@ public:
     int edgeFeatureMinValidNum;
     int surfFeatureMinValidNum;
 
-    // Robust scan-to-map kernels
+    // Registration and covariance modes
+    int registrationWeightMode;
+    int factorCovarianceMode;
+    int degeneracyHessianMode;
+    int factorCovarianceMinCorrespondences;
+    double factorNominalResidualSigma;
+    double factorInformationDamping;
+    double factorInformationEigenvalueMin;
+    double factorInformationEigenvalueMax;
+    double factorCovarianceEigenvalueMin;
+    double factorCovarianceEigenvalueMax;
+    bool factorCovarianceUseFullMatrix;
+    bool factorCovarianceFallbackToFixed;
+
+    // Robust scan-to-map kernels (legacy aliases for registrationWeightMode)
     int robustKernelType;
     float huberDelta;
     float cauchyC;
 
-    // Reliability-aware adaptive covariance
+    // Reliability-aware adaptive covariance (legacy aliases for registrationWeightMode)
     bool adaptiveCovEnabled;
     int adaptiveCovMode;
     float reliabilityMin;
@@ -291,6 +305,31 @@ public:
         declare_parameter("surfFeatureMinValidNum", 100);
         get_parameter("surfFeatureMinValidNum", surfFeatureMinValidNum);
 
+        declare_parameter("registrationWeightMode", 0);
+        get_parameter("registrationWeightMode", registrationWeightMode);
+        declare_parameter("factorCovarianceMode", 0);
+        get_parameter("factorCovarianceMode", factorCovarianceMode);
+        declare_parameter("degeneracyHessianMode", 0);
+        get_parameter("degeneracyHessianMode", degeneracyHessianMode);
+        declare_parameter("factorCovarianceMinCorrespondences", 50);
+        get_parameter("factorCovarianceMinCorrespondences", factorCovarianceMinCorrespondences);
+        declare_parameter("factorNominalResidualSigma", 1.0);
+        get_parameter("factorNominalResidualSigma", factorNominalResidualSigma);
+        declare_parameter("factorInformationDamping", 1.0e-6);
+        get_parameter("factorInformationDamping", factorInformationDamping);
+        declare_parameter("factorInformationEigenvalueMin", 1.0e-6);
+        get_parameter("factorInformationEigenvalueMin", factorInformationEigenvalueMin);
+        declare_parameter("factorInformationEigenvalueMax", 1.0e9);
+        get_parameter("factorInformationEigenvalueMax", factorInformationEigenvalueMax);
+        declare_parameter("factorCovarianceEigenvalueMin", 1.0e-8);
+        get_parameter("factorCovarianceEigenvalueMin", factorCovarianceEigenvalueMin);
+        declare_parameter("factorCovarianceEigenvalueMax", 1.0e4);
+        get_parameter("factorCovarianceEigenvalueMax", factorCovarianceEigenvalueMax);
+        declare_parameter("factorCovarianceUseFullMatrix", true);
+        get_parameter("factorCovarianceUseFullMatrix", factorCovarianceUseFullMatrix);
+        declare_parameter("factorCovarianceFallbackToFixed", true);
+        get_parameter("factorCovarianceFallbackToFixed", factorCovarianceFallbackToFixed);
+
         declare_parameter("robustKernelType", 0);
         get_parameter("robustKernelType", robustKernelType);
         declare_parameter("huberDelta", 0.1);
@@ -316,6 +355,28 @@ public:
         get_parameter("reliabilityWeightMax", reliabilityWeightMax);
         declare_parameter("reliabilityDiagnosticsStride", 10);
         get_parameter("reliabilityDiagnosticsStride", reliabilityDiagnosticsStride);
+
+        if (registrationWeightMode == 0 && robustKernelType > 0)
+        {
+            registrationWeightMode = robustKernelType;
+            RCLCPP_WARN(
+                get_logger(),
+                "robustKernelType is deprecated; using registrationWeightMode=%d as a legacy alias.",
+                registrationWeightMode);
+        }
+        if (registrationWeightMode == 0 && adaptiveCovEnabled && adaptiveCovMode > 0)
+        {
+            if (adaptiveCovMode == 1)
+                registrationWeightMode = 4;
+            else if (adaptiveCovMode == 2)
+                registrationWeightMode = 5;
+            else if (adaptiveCovMode == 3)
+                registrationWeightMode = 6;
+            RCLCPP_WARN(
+                get_logger(),
+                "adaptiveCovEnabled/adaptiveCovMode are deprecated in the registration solve; using registrationWeightMode=%d as a legacy alias.",
+                registrationWeightMode);
+        }
 
         declare_parameter("odometrySurfLeafSize", 0.4);
         get_parameter("odometrySurfLeafSize", odometrySurfLeafSize);

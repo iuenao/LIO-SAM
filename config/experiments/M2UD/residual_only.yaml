@@ -1,0 +1,10 @@
+/**:
+  ros__parameters:
+    viEnabled: false
+    registrationWeightMode: 0
+    factorCovarianceMode: 2
+    degeneracyHessianMode: 0
+    robustKernelType: 0
+    adaptiveCovEnabled: false
+    adaptiveCovMode: 0
+    method_name: "residual_only"

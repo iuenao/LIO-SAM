@@ -58,6 +58,18 @@
     surfThreshold: 0.1
     edgeFeatureMinValidNum: 10
     surfFeatureMinValidNum: 100
+    registrationWeightMode: 0
+    factorCovarianceMode: 0
+    degeneracyHessianMode: 0
+    factorCovarianceMinCorrespondences: 50
+    factorNominalResidualSigma: 1.0
+    factorInformationDamping: 1.0e-6
+    factorInformationEigenvalueMin: 1.0e-6
+    factorInformationEigenvalueMax: 1.0e9
+    factorCovarianceEigenvalueMin: 1.0e-8
+    factorCovarianceEigenvalueMax: 1.0e4
+    factorCovarianceUseFullMatrix: true
+    factorCovarianceFallbackToFixed: true
     robustKernelType: 0
     huberDelta: 0.1
     cauchyC: 0.8
@@ -70,6 +82,19 @@
     reliabilityWeightMin: 0.001
     reliabilityWeightMax: 1.0
     reliabilityDiagnosticsStride: 10
+
+    # Diagnostics logging. The ablation script enables these per run.
+    enableTrajectoryCSV: false
+    enableDiagnosticsCSV: false
+    enablePointLevelReliabilityCSV: false
+    diagnosticsOutputDir: "/tmp/lio_sam_reliability"
+    diagnosticsFilePrefix: "m2ud"
+    run_id: "m2ud_method_seed"
+    dataset_name: "M2UD"
+    sequence_name: "replace_me"
+    method_name: "fixed"
+    config_file: "M2UD.yaml"
+    bag_name: "replace_me"
 
     # Voxel filters.
     odometrySurfLeafSize: 0.4
