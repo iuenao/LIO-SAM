@@ -2,8 +2,9 @@
 """
 Run LIO-SAM ablation methods over a ROS 2 bag with generated per-method YAMLs.
 
-The fixed, Huber, and Cauchy methods are active in LIO-SAM. Adaptive covariance
-method names are kept in the generator for the next implementation stage.
+The fixed, Huber, Cauchy, geometry-only, residual-only, and reliability-aware
+methods are active in LIO-SAM. Each run gets a generated YAML config and its own
+diagnostic/trajectory output directory.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ METHODS: Dict[str, Dict[str, object]] = {
         "robustKernelType": 0,
         "adaptiveCovEnabled": False,
         "adaptiveCovMode": 0,
+        "reliabilityDiagnosticsStride": 10,
         "method_name": "fixed",
     },
     "huber": {
@@ -36,6 +38,7 @@ METHODS: Dict[str, Dict[str, object]] = {
         "huberDelta": 0.1,
         "adaptiveCovEnabled": False,
         "adaptiveCovMode": 0,
+        "reliabilityDiagnosticsStride": 10,
         "method_name": "huber",
     },
     "cauchy": {
@@ -44,6 +47,7 @@ METHODS: Dict[str, Dict[str, object]] = {
         "cauchyC": 0.8,
         "adaptiveCovEnabled": False,
         "adaptiveCovMode": 0,
+        "reliabilityDiagnosticsStride": 10,
         "method_name": "cauchy",
     },
     "raw_hessian": {
@@ -51,6 +55,7 @@ METHODS: Dict[str, Dict[str, object]] = {
         "robustKernelType": 0,
         "adaptiveCovEnabled": True,
         "adaptiveCovMode": 1,
+        "reliabilityDiagnosticsStride": 10,
         "method_name": "raw_hessian",
     },
     "residual_only": {
@@ -58,13 +63,15 @@ METHODS: Dict[str, Dict[str, object]] = {
         "robustKernelType": 0,
         "adaptiveCovEnabled": True,
         "adaptiveCovMode": 2,
+        "reliabilityDiagnosticsStride": 10,
         "method_name": "residual_only",
     },
     "reliability": {
-        "viEnabled": True,
+        "viEnabled": False,
         "robustKernelType": 0,
         "adaptiveCovEnabled": True,
         "adaptiveCovMode": 3,
+        "reliabilityDiagnosticsStride": 10,
         "method_name": "reliability",
     },
 }
@@ -225,6 +232,38 @@ def terminate_process_tree(proc: subprocess.Popen, timeout: float = 15.0) -> Non
     proc.wait(timeout=timeout)
 
 
+def extract_duration_from_play_args(play_args: List[str]) -> tuple[List[str], float | None]:
+    cleaned: List[str] = []
+    duration: float | None = None
+    index = 0
+    while index < len(play_args):
+        arg = play_args[index]
+        if arg == "--duration":
+            if index + 1 >= len(play_args):
+                raise ValueError("--duration requires a value in seconds")
+            duration = float(play_args[index + 1])
+            index += 2
+            continue
+        if arg.startswith("--duration="):
+            duration = float(arg.split("=", 1)[1])
+            index += 1
+            continue
+        cleaned.append(arg)
+        index += 1
+    return cleaned, duration
+
+
+def wait_for_bag_play(proc: subprocess.Popen, duration: float | None) -> int:
+    if duration is None:
+        return proc.wait()
+    try:
+        proc.wait(timeout=duration)
+        return proc.returncode
+    except subprocess.TimeoutExpired:
+        terminate_process_tree(proc)
+        return 0
+
+
 def run_method(args: argparse.Namespace, method: str) -> bool:
     workspace = args.workspace.resolve()
     bag = resolve_bag_path(args.bag)
@@ -253,7 +292,9 @@ def run_method(args: argparse.Namespace, method: str) -> bool:
     if args.launch_args:
         launch_cmd += " " + " ".join(shlex.quote(part) for part in args.launch_args)
 
-    play_args = shlex.split(args.play_args)
+    play_args, play_duration = extract_duration_from_play_args(shlex.split(args.play_args))
+    if args.bag_duration is not None:
+        play_duration = args.bag_duration
     bag_cmd = (
         f"{setup} && ros2 bag play {shlex.quote(str(bag))} "
         + " ".join(shlex.quote(part) for part in play_args)
@@ -271,7 +312,7 @@ def run_method(args: argparse.Namespace, method: str) -> bool:
             return False
 
         bag_proc = popen_bash(bag_cmd, run_dir / "bag_play.log", workspace)
-        bag_code = bag_proc.wait()
+        bag_code = wait_for_bag_play(bag_proc, play_duration)
         time.sleep(args.settle_time)
         if bag_code != 0:
             print(f"[error] ros2 bag play failed for {method}; see {run_dir / 'bag_play.log'}")
@@ -300,14 +341,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        default=["fixed", "huber", "cauchy"],
+        default=["fixed", "huber", "cauchy", "raw_hessian", "residual_only", "reliability"],
         choices=list(METHODS.keys()),
-        help="Methods to run in order. Defaults to the active fixed, Huber, and Cauchy variants.",
+        help="Methods to run in order. Defaults to all active ablation variants.",
     )
     parser.add_argument(
         "--play-args",
         default="--clock",
-        help='Extra args passed to "ros2 bag play", e.g. "--clock --duration 250"',
+        help='Extra args passed to "ros2 bag play". A legacy "--duration N" value is handled by this script.',
+    )
+    parser.add_argument(
+        "--bag-duration",
+        type=float,
+        default=None,
+        help="Stop ros2 bag play after this many wall-clock seconds.",
     )
     parser.add_argument(
         "--launch-args",

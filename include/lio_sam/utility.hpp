@@ -130,6 +130,17 @@ public:
     float huberDelta;
     float cauchyC;
 
+    // Reliability-aware adaptive covariance
+    bool adaptiveCovEnabled;
+    int adaptiveCovMode;
+    float reliabilityMin;
+    float reliabilityResidualScale;
+    float reliabilityCornerRatioRef;
+    float reliabilitySurfFitScale;
+    float reliabilityWeightMin;
+    float reliabilityWeightMax;
+    int reliabilityDiagnosticsStride;
+
     // voxel filter paprams
     float odometrySurfLeafSize;
     float mappingCornerLeafSize;
@@ -286,6 +297,25 @@ public:
         get_parameter("huberDelta", huberDelta);
         declare_parameter("cauchyC", 0.8);
         get_parameter("cauchyC", cauchyC);
+
+        declare_parameter("adaptiveCovEnabled", false);
+        get_parameter("adaptiveCovEnabled", adaptiveCovEnabled);
+        declare_parameter("adaptiveCovMode", 0);
+        get_parameter("adaptiveCovMode", adaptiveCovMode);
+        declare_parameter("reliabilityMin", 0.05);
+        get_parameter("reliabilityMin", reliabilityMin);
+        declare_parameter("reliabilityResidualScale", 0.2);
+        get_parameter("reliabilityResidualScale", reliabilityResidualScale);
+        declare_parameter("reliabilityCornerRatioRef", 10.0);
+        get_parameter("reliabilityCornerRatioRef", reliabilityCornerRatioRef);
+        declare_parameter("reliabilitySurfFitScale", 0.2);
+        get_parameter("reliabilitySurfFitScale", reliabilitySurfFitScale);
+        declare_parameter("reliabilityWeightMin", 1e-3);
+        get_parameter("reliabilityWeightMin", reliabilityWeightMin);
+        declare_parameter("reliabilityWeightMax", 1.0);
+        get_parameter("reliabilityWeightMax", reliabilityWeightMax);
+        declare_parameter("reliabilityDiagnosticsStride", 10);
+        get_parameter("reliabilityDiagnosticsStride", reliabilityDiagnosticsStride);
 
         declare_parameter("odometrySurfLeafSize", 0.4);
         get_parameter("odometrySurfLeafSize", odometrySurfLeafSize);

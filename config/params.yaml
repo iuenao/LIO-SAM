@@ -57,6 +57,15 @@
     robustKernelType: 0                         # 0: none/fixed, 1: Huber, 2: Cauchy
     huberDelta: 0.1
     cauchyC: 0.8
+    adaptiveCovEnabled: false
+    adaptiveCovMode: 0                          # 0: none, 1: geometry, 2: residual, 3: geometry*residual
+    reliabilityMin: 0.05
+    reliabilityResidualScale: 0.2
+    reliabilityCornerRatioRef: 10.0
+    reliabilitySurfFitScale: 0.2
+    reliabilityWeightMin: 0.001
+    reliabilityWeightMax: 1.0
+    reliabilityDiagnosticsStride: 10
 
     # voxel filter paprams
     odometrySurfLeafSize: 0.4                     # default: 0.4 - outdoor, 0.2 - indoor

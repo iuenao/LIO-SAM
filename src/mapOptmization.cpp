@@ -47,6 +47,14 @@ POINT_CLOUD_REGISTER_POINT_STRUCT (PointXYZIRPYT,
                                    (float, roll, roll) (float, pitch, pitch) (float, yaw, yaw)
                                    (double, time, time))
 
+struct ResidualReliability
+{
+    float geometry = 1.0f;
+    float residual = 1.0f;
+    float weight = 1.0f;
+    int featureType = 0; // 1: corner, 2: surf
+};
+
 typedef PointXYZIRPYT  PointTypePose;
 
 
@@ -99,12 +107,15 @@ public:
 
     pcl::PointCloud<PointType>::Ptr laserCloudOri;
     pcl::PointCloud<PointType>::Ptr coeffSel;
+    std::vector<ResidualReliability> reliabilitySel;
 
     std::vector<PointType> laserCloudOriCornerVec; // corner point holder for parallel computation
     std::vector<PointType> coeffSelCornerVec;
+    std::vector<ResidualReliability> reliabilityCornerVec;
     std::vector<bool> laserCloudOriCornerFlag;
     std::vector<PointType> laserCloudOriSurfVec; // surf point holder for parallel computation
     std::vector<PointType> coeffSelSurfVec;
+    std::vector<ResidualReliability> reliabilitySurfVec;
     std::vector<bool> laserCloudOriSurfFlag;
 
     map<int, pair<pcl::PointCloud<PointType>, pcl::PointCloud<PointType>>> laserCloudMapContainer;
@@ -137,8 +148,10 @@ public:
 
     std::ofstream trajectoryFile;
     std::ofstream tumTrajectoryFile;
+    std::ofstream reliabilityDiagnosticsFile;
     bool trajectoryFileOpen = false;
     bool tumTrajectoryFileOpen = false;
+    bool reliabilityDiagnosticsFileOpen = false;
     bool enableTrajectoryCSV = false;
     bool enableDiagnosticsCSV = false;
     std::string diagnosticsOutputDir;
@@ -335,6 +348,26 @@ public:
                 RCLCPP_WARN(get_logger(), "Failed to open TUM trajectory at %s", tumPath.string().c_str());
             }
         }
+
+        if (enableDiagnosticsCSV)
+        {
+            std::filesystem::path reliabilityPath =
+                std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_reliability.csv");
+            reliabilityDiagnosticsFile.open(reliabilityPath, std::ios::out | std::ios::trunc);
+            if (reliabilityDiagnosticsFile.is_open())
+            {
+                reliabilityDiagnosticsFileOpen = true;
+                reliabilityDiagnosticsFile
+                    << "timestamp,iteration,index,feature_type,residual,robust_weight,"
+                    << "geometry_reliability,residual_reliability,reliability_weight,total_weight"
+                    << std::endl;
+                RCLCPP_INFO(get_logger(), "Reliability diagnostics CSV opened at %s", reliabilityPath.string().c_str());
+            }
+            else
+            {
+                RCLCPP_WARN(get_logger(), "Failed to open reliability diagnostics CSV at %s", reliabilityPath.string().c_str());
+            }
+        }
     }
 
     std::string csvEscape(const std::string& value) const
@@ -428,6 +461,8 @@ public:
         laserCloudOriCornerFlag.resize(N_SCAN * Horizon_SCAN);
         laserCloudOriSurfVec.resize(N_SCAN * Horizon_SCAN);
         coeffSelSurfVec.resize(N_SCAN * Horizon_SCAN);
+        reliabilityCornerVec.resize(N_SCAN * Horizon_SCAN);
+        reliabilitySurfVec.resize(N_SCAN * Horizon_SCAN);
         laserCloudOriSurfFlag.resize(N_SCAN * Horizon_SCAN);
 
         std::fill(laserCloudOriCornerFlag.begin(), laserCloudOriCornerFlag.end(), false);
@@ -1126,6 +1161,68 @@ public:
         transPointAssociateToMap = trans2Affine3f(transformTobeMapped);
     }
 
+    float clampReliability(float value) const
+    {
+        const float minValue = std::max(reliabilityMin, 1e-3f);
+        return std::clamp(value, minValue, 1.0f);
+    }
+
+    float computeCornerGeometryReliability(float lambda0, float lambda1) const
+    {
+        const float ratio = lambda0 / std::max(lambda1, 1e-6f);
+        const float threshold = 3.0f;
+        const float reference = std::max(reliabilityCornerRatioRef, threshold + 1e-3f);
+        return clampReliability((ratio - threshold) / (reference - threshold));
+    }
+
+    float computeSurfGeometryReliability(float maxPlaneDistance) const
+    {
+        const float scale = std::max(reliabilitySurfFitScale, 1e-6f);
+        return clampReliability(std::exp(-(maxPlaneDistance * maxPlaneDistance) / (scale * scale)));
+    }
+
+    float computeResidualReliability(float residual) const
+    {
+        const float scale = std::max(reliabilityResidualScale, 1e-6f);
+        return clampReliability(std::exp(-(residual * residual) / (scale * scale)));
+    }
+
+    ResidualReliability makeReliability(float geometryReliability, float residualValue, int featureType) const
+    {
+        ResidualReliability reliability;
+        reliability.geometry = clampReliability(geometryReliability);
+        reliability.residual = computeResidualReliability(residualValue);
+        reliability.featureType = featureType;
+
+        if (!adaptiveCovEnabled)
+        {
+            reliability.weight = 1.0f;
+            return reliability;
+        }
+
+        switch (adaptiveCovMode)
+        {
+            case 1:
+                reliability.weight = reliability.geometry;
+                break;
+            case 2:
+                reliability.weight = reliability.residual;
+                break;
+            case 3:
+                reliability.weight = reliability.geometry * reliability.residual;
+                break;
+            default:
+                reliability.weight = 1.0f;
+                break;
+        }
+
+        reliability.weight = std::clamp(
+            reliability.weight,
+            std::max(reliabilityWeightMin, 1e-6f),
+            std::max(reliabilityWeightMax, std::max(reliabilityWeightMin, 1e-6f)));
+        return reliability;
+    }
+
     void cornerOptimization()
     {
         updatePointAssociateToMap();
@@ -1211,6 +1308,10 @@ public:
                     if (s > 0.1) {
                         laserCloudOriCornerVec[i] = pointOri;
                         coeffSelCornerVec[i] = coeff;
+                        reliabilityCornerVec[i] = makeReliability(
+                            computeCornerGeometryReliability(matD1.at<float>(0, 0), matD1.at<float>(0, 1)),
+                            coeff.intensity,
+                            1);
                         laserCloudOriCornerFlag[i] = true;
                     }
                 }
@@ -1259,10 +1360,13 @@ public:
                 pa /= ps; pb /= ps; pc /= ps; pd /= ps;
 
                 bool planeValid = true;
+                float maxPlaneDistance = 0.0f;
                 for (int j = 0; j < 5; j++) {
-                    if (fabs(pa * laserCloudSurfFromMapDS->points[pointSearchInd[j]].x +
-                             pb * laserCloudSurfFromMapDS->points[pointSearchInd[j]].y +
-                             pc * laserCloudSurfFromMapDS->points[pointSearchInd[j]].z + pd) > 0.2) {
+                    const float planeDistance = fabs(pa * laserCloudSurfFromMapDS->points[pointSearchInd[j]].x +
+                                                      pb * laserCloudSurfFromMapDS->points[pointSearchInd[j]].y +
+                                                      pc * laserCloudSurfFromMapDS->points[pointSearchInd[j]].z + pd);
+                    maxPlaneDistance = std::max(maxPlaneDistance, planeDistance);
+                    if (planeDistance > 0.2) {
                         planeValid = false;
                         break;
                     }
@@ -1282,6 +1386,10 @@ public:
                     if (s > 0.1) {
                         laserCloudOriSurfVec[i] = pointOri;
                         coeffSelSurfVec[i] = coeff;
+                        reliabilitySurfVec[i] = makeReliability(
+                            computeSurfGeometryReliability(maxPlaneDistance),
+                            coeff.intensity,
+                            2);
                         laserCloudOriSurfFlag[i] = true;
                     }
                 }
@@ -1296,6 +1404,7 @@ public:
             if (laserCloudOriCornerFlag[i] == true){
                 laserCloudOri->push_back(laserCloudOriCornerVec[i]);
                 coeffSel->push_back(coeffSelCornerVec[i]);
+                reliabilitySel.push_back(reliabilityCornerVec[i]);
             }
         }
         // combine surf coeffs
@@ -1303,6 +1412,7 @@ public:
             if (laserCloudOriSurfFlag[i] == true){
                 laserCloudOri->push_back(laserCloudOriSurfVec[i]);
                 coeffSel->push_back(coeffSelSurfVec[i]);
+                reliabilitySel.push_back(reliabilitySurfVec[i]);
             }
         }
         // reset flag for next iteration
@@ -1367,8 +1477,15 @@ public:
             float arz = ((crz*srx*sry - cry*srz)*pointOri.x + (-cry*crz-srx*sry*srz)*pointOri.y)*coeff.x
                       + (crx*crz*pointOri.x - crx*srz*pointOri.y) * coeff.y
                       + ((sry*srz + cry*crz*srx)*pointOri.x + (crz*sry-cry*srx*srz)*pointOri.y)*coeff.z;
+            const ResidualReliability reliability =
+                i < (int)reliabilitySel.size() ? reliabilitySel[i] : ResidualReliability();
             const float robustWeight = computeRobustWeight(coeff.intensity);
-            const float sqrtWeight = std::sqrt(std::max(robustWeight, 1e-3f));
+            const float reliabilityWeight = adaptiveCovEnabled ? reliability.weight : 1.0f;
+            const float totalWeight = std::max(robustWeight * reliabilityWeight, 1e-3f);
+            const float sqrtWeight = std::sqrt(totalWeight);
+
+            writeReliabilityDiagnostics(
+                iterCount, i, reliability, coeff.intensity, robustWeight, reliabilityWeight, totalWeight);
 
             // lidar -> camera
             matA.at<float>(i, 0) = sqrtWeight * arz;
@@ -1452,6 +1569,7 @@ public:
             {
                 laserCloudOri->clear();
                 coeffSel->clear();
+                reliabilitySel.clear();
 
                 cornerOptimization();
                 surfOptimization();
@@ -1508,6 +1626,36 @@ public:
             value = limit;
 
         return value;
+    }
+
+    void writeReliabilityDiagnostics(
+        int iterCount,
+        int index,
+        const ResidualReliability& reliability,
+        float residual,
+        float robustWeight,
+        float reliabilityWeight,
+        float totalWeight)
+    {
+        if (!reliabilityDiagnosticsFileOpen)
+            return;
+
+        const int stride = std::max(reliabilityDiagnosticsStride, 1);
+        if (index % stride != 0)
+            return;
+
+        reliabilityDiagnosticsFile << std::fixed << std::setprecision(9)
+                                   << timeLaserInfoCur << ","
+                                   << iterCount << ","
+                                   << index << ","
+                                   << reliability.featureType << ","
+                                   << residual << ","
+                                   << robustWeight << ","
+                                   << reliability.geometry << ","
+                                   << reliability.residual << ","
+                                   << reliabilityWeight << ","
+                                   << totalWeight
+                                   << std::endl;
     }
 
     float computeRobustWeight(float residual)

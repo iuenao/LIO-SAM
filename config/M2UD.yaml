@@ -61,6 +61,15 @@
     robustKernelType: 0
     huberDelta: 0.1
     cauchyC: 0.8
+    adaptiveCovEnabled: false
+    adaptiveCovMode: 0
+    reliabilityMin: 0.05
+    reliabilityResidualScale: 0.2
+    reliabilityCornerRatioRef: 10.0
+    reliabilitySurfFitScale: 0.2
+    reliabilityWeightMin: 0.001
+    reliabilityWeightMax: 1.0
+    reliabilityDiagnosticsStride: 10
 
     # Voxel filters.
     odometrySurfLeafSize: 0.4
