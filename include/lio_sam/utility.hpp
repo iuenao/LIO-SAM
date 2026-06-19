@@ -130,7 +130,12 @@ public:
     int factorCovarianceMode;
     int degeneracyHessianMode;
     int factorCovarianceMinCorrespondences;
+    int factorCovarianceScaleMode;
     double factorNominalResidualSigma;
+    double factorCovarianceGlobalMultiplier;
+    double factorCovarianceAdaptiveBlend;
+    double factorOnlineSigmaMin;
+    double factorOnlineSigmaMax;
     double factorInformationDamping;
     double factorInformationEigenvalueMin;
     double factorInformationEigenvalueMax;
@@ -138,6 +143,8 @@ public:
     double factorCovarianceEigenvalueMax;
     bool factorCovarianceUseFullMatrix;
     bool factorCovarianceFallbackToFixed;
+    double covarianceJacobianRotationEpsilon;
+    double covarianceJacobianTranslationEpsilon;
 
     // Robust scan-to-map kernels (legacy aliases for registrationWeightMode)
     int robustKernelType;
@@ -313,8 +320,18 @@ public:
         get_parameter("degeneracyHessianMode", degeneracyHessianMode);
         declare_parameter("factorCovarianceMinCorrespondences", 50);
         get_parameter("factorCovarianceMinCorrespondences", factorCovarianceMinCorrespondences);
+        declare_parameter("factorCovarianceScaleMode", 0);
+        get_parameter("factorCovarianceScaleMode", factorCovarianceScaleMode);
         declare_parameter("factorNominalResidualSigma", 1.0);
         get_parameter("factorNominalResidualSigma", factorNominalResidualSigma);
+        declare_parameter("factorCovarianceGlobalMultiplier", 1.0);
+        get_parameter("factorCovarianceGlobalMultiplier", factorCovarianceGlobalMultiplier);
+        declare_parameter("factorCovarianceAdaptiveBlend", 1.0);
+        get_parameter("factorCovarianceAdaptiveBlend", factorCovarianceAdaptiveBlend);
+        declare_parameter("factorOnlineSigmaMin", 0.01);
+        get_parameter("factorOnlineSigmaMin", factorOnlineSigmaMin);
+        declare_parameter("factorOnlineSigmaMax", 2.0);
+        get_parameter("factorOnlineSigmaMax", factorOnlineSigmaMax);
         declare_parameter("factorInformationDamping", 1.0e-6);
         get_parameter("factorInformationDamping", factorInformationDamping);
         declare_parameter("factorInformationEigenvalueMin", 1.0e-6);
@@ -329,6 +346,10 @@ public:
         get_parameter("factorCovarianceUseFullMatrix", factorCovarianceUseFullMatrix);
         declare_parameter("factorCovarianceFallbackToFixed", true);
         get_parameter("factorCovarianceFallbackToFixed", factorCovarianceFallbackToFixed);
+        declare_parameter("covarianceJacobianRotationEpsilon", 1.0e-6);
+        get_parameter("covarianceJacobianRotationEpsilon", covarianceJacobianRotationEpsilon);
+        declare_parameter("covarianceJacobianTranslationEpsilon", 1.0e-5);
+        get_parameter("covarianceJacobianTranslationEpsilon", covarianceJacobianTranslationEpsilon);
 
         declare_parameter("robustKernelType", 0);
         get_parameter("robustKernelType", robustKernelType);

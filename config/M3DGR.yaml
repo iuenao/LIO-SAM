@@ -66,7 +66,12 @@
     factorCovarianceMode: 0
     degeneracyHessianMode: 0
     factorCovarianceMinCorrespondences: 50
+    factorCovarianceScaleMode: 0
     factorNominalResidualSigma: 1.0
+    factorCovarianceGlobalMultiplier: 1.0
+    factorCovarianceAdaptiveBlend: 1.0
+    factorOnlineSigmaMin: 0.01
+    factorOnlineSigmaMax: 2.0
     factorInformationDamping: 1.0e-6
     factorInformationEigenvalueMin: 1.0e-6
     factorInformationEigenvalueMax: 1.0e9
@@ -74,6 +79,8 @@
     factorCovarianceEigenvalueMax: 1.0e4
     factorCovarianceUseFullMatrix: true
     factorCovarianceFallbackToFixed: true
+    covarianceJacobianRotationEpsilon: 1.0e-6
+    covarianceJacobianTranslationEpsilon: 1.0e-5
     robustKernelType: 0
     huberDelta: 0.1
     cauchyC: 0.8

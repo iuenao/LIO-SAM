@@ -17,6 +17,7 @@
 #include <gtsam/nonlinear/ISAM2.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -83,6 +84,8 @@ struct FactorInformationDiagnostics
     double timestamp = 0.0;
     int registrationWeightMode = 0;
     int factorCovarianceMode = 0;
+    int factorCovarianceScaleMode = 0;
+    double factorCovarianceAdaptiveBlend = 1.0;
     int numCorner = 0;
     int numSurface = 0;
     int numTotal = 0;
@@ -96,6 +99,8 @@ struct FactorInformationDiagnostics
     Eigen::Matrix<double, 6, 1> weightedInformationEigenvalues = Eigen::Matrix<double, 6, 1>::Zero();
     Eigen::Matrix<double, 6, 1> covarianceDiagonal = Eigen::Matrix<double, 6, 1>::Zero();
     double covarianceTrace = 0.0;
+    double covarianceRotationTrace = 0.0;
+    double covarianceTranslationTrace = 0.0;
     double rawConditionNumber = 0.0;
     double weightedConditionNumber = 0.0;
     bool covarianceValid = false;
@@ -104,6 +109,8 @@ struct FactorInformationDiagnostics
     int lmIterations = 0;
     double registrationRuntimeMs = 0.0;
     double finalInformationRuntimeMs = 0.0;
+    double transformUpdateDeltaRotationDeg = 0.0;
+    double transformUpdateDeltaTranslationM = 0.0;
 };
 
 typedef PointXYZIRPYT  PointTypePose;
@@ -475,6 +482,7 @@ public:
     {
         file
             << "timestamp,keyframe_index,registration_weight_mode,factor_covariance_mode,"
+            << "factor_covariance_scale_mode,factor_covariance_adaptive_blend,"
             << "num_corner,num_surface,num_total,"
             << "mean_abs_raw_residual,rmse_raw_residual,"
             << "mean_geometry_reliability,mean_residual_reliability,mean_combined_reliability,"
@@ -483,8 +491,10 @@ public:
             << "weighted_info_eig_0,weighted_info_eig_1,weighted_info_eig_2,weighted_info_eig_3,weighted_info_eig_4,weighted_info_eig_5,"
             << "raw_condition_number,weighted_condition_number,"
             << "cov_0_0,cov_1_1,cov_2_2,cov_3_3,cov_4_4,cov_5_5,"
-            << "covariance_trace,covariance_valid,used_fixed_fallback,is_degenerate,"
-            << "lm_iterations,registration_runtime_ms,factor_information_runtime_ms"
+            << "covariance_trace,covariance_rotation_trace,covariance_translation_trace,"
+            << "covariance_valid,used_fixed_fallback,is_degenerate,"
+            << "lm_iterations,registration_runtime_ms,factor_information_runtime_ms,"
+            << "transform_update_delta_rotation_deg,transform_update_delta_translation_m"
             << '\n';
     }
 
@@ -499,6 +509,8 @@ public:
              << keyframeIndex << ","
              << diagnostics.registrationWeightMode << ","
              << diagnostics.factorCovarianceMode << ","
+             << diagnostics.factorCovarianceScaleMode << ","
+             << diagnostics.factorCovarianceAdaptiveBlend << ","
              << diagnostics.numCorner << ","
              << diagnostics.numSurface << ","
              << diagnostics.numTotal << ","
@@ -520,12 +532,16 @@ public:
             file << "," << diagnostics.covarianceDiagonal(i);
         file << ","
              << diagnostics.covarianceTrace << ","
+             << diagnostics.covarianceRotationTrace << ","
+             << diagnostics.covarianceTranslationTrace << ","
              << (diagnostics.covarianceValid ? 1 : 0) << ","
              << (usedFixedFallback ? 1 : 0) << ","
              << (diagnostics.isDegenerate ? 1 : 0) << ","
              << diagnostics.lmIterations << ","
              << diagnostics.registrationRuntimeMs << ","
-             << diagnostics.finalInformationRuntimeMs
+             << diagnostics.finalInformationRuntimeMs << ","
+             << diagnostics.transformUpdateDeltaRotationDeg << ","
+             << diagnostics.transformUpdateDeltaTranslationM
              << '\n';
     }
 
@@ -1493,24 +1509,126 @@ public:
         return covariance;
     }
 
-    Eigen::Matrix<double, 6, 6> loamToGtsamTangentPermutation() const
+    gtsam::Pose3 lmArrayToGtsamPose(const std::array<float, 6>& transformIn) const
     {
-        Eigen::Matrix<double, 6, 6> permutation = Eigen::Matrix<double, 6, 6>::Identity();
-        return permutation;
+        return gtsam::Pose3(
+            gtsam::Rot3::RzRyRx(transformIn[0], transformIn[1], transformIn[2]),
+            gtsam::Point3(transformIn[3], transformIn[4], transformIn[5]));
     }
 
-    gtsam::Matrix6 convertLoamCovarianceToGtsam(const Eigen::Matrix<double, 6, 6>& covarianceLoam) const
+    std::array<float, 6> currentLmPoseArray() const
     {
-        const Eigen::Matrix<double, 6, 6> permutation = loamToGtsamTangentPermutation();
-        Eigen::Matrix<double, 6, 6> covarianceGtsam = permutation * covarianceLoam * permutation.transpose();
-        covarianceGtsam = 0.5 * (covarianceGtsam + covarianceGtsam.transpose());
-        return covarianceGtsam;
+        std::array<float, 6> pose{};
+        for (int i = 0; i < 6; ++i)
+            pose[i] = transformTobeMapped[i];
+        return pose;
+    }
+
+    bool matrixPositiveDefinite(const Eigen::Matrix<double, 6, 6>& matrix) const
+    {
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(0.5 * (matrix + matrix.transpose()));
+        return solver.info() == Eigen::Success && solver.eigenvalues().minCoeff() > 0.0;
+    }
+
+    bool computeLmToRelativeFactorJacobian(
+        const gtsam::Pose3& previousPose,
+        const std::array<float, 6>& currentLmPose,
+        Eigen::Matrix<double, 6, 6>* jacobian,
+        std::string* errorMessage) const
+    {
+        if (!jacobian)
+        {
+            if (errorMessage)
+                *errorMessage = "null Jacobian output";
+            return false;
+        }
+
+        const double rotationEpsilon = std::max(covarianceJacobianRotationEpsilon, 1e-9);
+        const double translationEpsilon = std::max(covarianceJacobianTranslationEpsilon, 1e-9);
+        const gtsam::Pose3 currentPose = lmArrayToGtsamPose(currentLmPose);
+        const gtsam::Pose3 nominalRelative = previousPose.between(currentPose);
+        jacobian->setZero();
+
+        for (int column = 0; column < 6; ++column)
+        {
+            const double epsilon = column < 3 ? rotationEpsilon : translationEpsilon;
+            std::array<float, 6> plusPose = currentLmPose;
+            std::array<float, 6> minusPose = currentLmPose;
+            plusPose[column] += epsilon;
+            minusPose[column] -= epsilon;
+
+            const gtsam::Pose3 plusRelative = previousPose.between(lmArrayToGtsamPose(plusPose));
+            const gtsam::Pose3 minusRelative = previousPose.between(lmArrayToGtsamPose(minusPose));
+            const gtsam::Vector6 xiPlus =
+                gtsam::Pose3::Logmap(nominalRelative.inverse().compose(plusRelative));
+            const gtsam::Vector6 xiMinus =
+                gtsam::Pose3::Logmap(nominalRelative.inverse().compose(minusRelative));
+
+            jacobian->col(column) = (xiPlus - xiMinus) / (2.0 * epsilon);
+        }
+
+        if (!matrixFinite(*jacobian))
+        {
+            if (errorMessage)
+                *errorMessage = "non-finite LM-to-relative tangent Jacobian";
+            jacobian->setZero();
+            return false;
+        }
+
+        return true;
+    }
+
+    bool convertLmPoseCovarianceToRelativeFactorCovariance(
+        const gtsam::Pose3& previousPose,
+        const std::array<float, 6>& currentLmPose,
+        const Eigen::Matrix<double, 6, 6>& covarianceLm,
+        gtsam::Matrix6* covarianceRelative,
+        std::string* errorMessage) const
+    {
+        if (!covarianceRelative)
+        {
+            if (errorMessage)
+                *errorMessage = "null relative covariance output";
+            return false;
+        }
+
+        if (!matrixFinite(covarianceLm) || !matrixPositiveDefinite(covarianceLm))
+        {
+            if (errorMessage)
+                *errorMessage = "invalid LM covariance";
+            return false;
+        }
+
+        Eigen::Matrix<double, 6, 6> jacobian;
+        if (!computeLmToRelativeFactorJacobian(previousPose, currentLmPose, &jacobian, errorMessage))
+            return false;
+
+        Eigen::Matrix<double, 6, 6> covariance =
+            jacobian * covarianceLm * jacobian.transpose();
+        covariance = 0.5 * (covariance + covariance.transpose());
+
+        if (!matrixFinite(covariance))
+        {
+            if (errorMessage)
+                *errorMessage = "non-finite relative factor covariance";
+            return false;
+        }
+
+        if (!matrixPositiveDefinite(covariance))
+        {
+            if (errorMessage)
+                *errorMessage = "non-positive-definite relative factor covariance";
+            return false;
+        }
+
+        *covarianceRelative = covariance;
+        return true;
     }
 
     void setFixedLidarFactorCovarianceFallback()
     {
         lastLidarFactorCovarianceLoam = fixedOdometryCovarianceLoam();
-        lastLidarFactorCovarianceGtsam = convertLoamCovarianceToGtsam(lastLidarFactorCovarianceLoam);
+        lastLidarFactorCovarianceGtsam = lastLidarFactorCovarianceLoam;
     }
 
     void invalidateLidarFactorCovariance()
@@ -1523,23 +1641,36 @@ public:
     bool runCovarianceConversionSelfTest()
     {
         Eigen::Matrix<double, 6, 6> covarianceLoam = Eigen::Matrix<double, 6, 6>::Zero();
-        covarianceLoam.diagonal() << 1.0, 2.0, 3.0, 4.0, 5.0, 6.0;
+        covarianceLoam.diagonal() << 1e-8, 2e-8, 3e-8, 1e-6, 2e-6, 3e-6;
 
-        const Eigen::Matrix<double, 6, 6> covarianceGtsam = convertLoamCovarianceToGtsam(covarianceLoam);
-        const bool passed = (covarianceGtsam - covarianceLoam).cwiseAbs().maxCoeff() < 1e-12;
+        const std::array<float, 6> zeroPose{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        const std::array<float, 6> nonzeroPose{0.05f, -0.04f, 0.08f, 1.0f, -0.5f, 0.2f};
+        const gtsam::Pose3 identityPose;
+        const gtsam::Pose3 previousPose(
+            gtsam::Rot3::RzRyRx(-0.03, 0.02, -0.05),
+            gtsam::Point3(-0.3, 0.7, 0.1));
+
+        gtsam::Matrix6 covarianceZero = gtsam::Matrix6::Identity();
+        gtsam::Matrix6 covarianceNonzero = gtsam::Matrix6::Identity();
+        std::string errorMessage;
+        const bool passed =
+            convertLmPoseCovarianceToRelativeFactorCovariance(
+                identityPose, zeroPose, covarianceLoam, &covarianceZero, &errorMessage) &&
+            convertLmPoseCovarianceToRelativeFactorCovariance(
+                previousPose, nonzeroPose, covarianceLoam, &covarianceNonzero, &errorMessage);
 
         if (passed)
         {
             RCLCPP_INFO(
                 get_logger(),
-                "Covariance conversion self-test passed: LOAM [roll,pitch,yaw,x,y,z] -> "
-                "GTSAM [Rx,Ry,Rz,Tx,Ty,Tz] uses identity permutation.");
+                "Covariance conversion self-test passed: finite-difference LM pose covariance -> relative Pose3 tangent covariance.");
         }
         else
         {
             RCLCPP_ERROR(
                 get_logger(),
-                "Covariance conversion self-test failed; adaptive LiDAR factor covariance will fall back to fixed covariance.");
+                "Covariance conversion self-test failed (%s); adaptive LiDAR factor covariance will fall back to fixed covariance.",
+                errorMessage.c_str());
         }
 
         return passed;
@@ -1590,6 +1721,34 @@ public:
         if (solver.info() != Eigen::Success)
             return Eigen::Matrix<double, 6, 1>::Zero();
         return solver.eigenvalues();
+    }
+
+    Eigen::Matrix<double, 6, 6> blockTraceNormalizeToFixedCovariance(
+        const Eigen::Matrix<double, 6, 6>& covariance) const
+    {
+        const Eigen::Matrix<double, 6, 6> fixedCovariance = fixedOdometryCovarianceLoam();
+        const double epsilon = 1e-18;
+        const double rotationTrace = std::max(covariance.block<3, 3>(0, 0).trace(), epsilon);
+        const double translationTrace = std::max(covariance.block<3, 3>(3, 3).trace(), epsilon);
+        const double fixedRotationTrace = fixedCovariance.block<3, 3>(0, 0).trace();
+        const double fixedTranslationTrace = fixedCovariance.block<3, 3>(3, 3).trace();
+
+        const double rotationScale = std::sqrt(fixedRotationTrace / rotationTrace);
+        const double translationScale = std::sqrt(fixedTranslationTrace / translationTrace);
+
+        Eigen::Matrix<double, 6, 6> scale = Eigen::Matrix<double, 6, 6>::Identity();
+        for (int i = 0; i < 3; ++i)
+            scale(i, i) = rotationScale;
+        for (int i = 3; i < 6; ++i)
+            scale(i, i) = translationScale;
+
+        Eigen::Matrix<double, 6, 6> normalized = scale * covariance * scale;
+        return 0.5 * (normalized + normalized.transpose());
+    }
+
+    double normalizedAngleDifference(double angle) const
+    {
+        return std::remainder(angle, 2.0 * M_PI);
     }
 
     void cornerOptimization()
@@ -1973,6 +2132,8 @@ public:
         localDiagnostics.timestamp = timeLaserInfoCur;
         localDiagnostics.registrationWeightMode = registrationWeightMode;
         localDiagnostics.factorCovarianceMode = factorCovarianceMode;
+        localDiagnostics.factorCovarianceScaleMode = factorCovarianceScaleMode;
+        localDiagnostics.factorCovarianceAdaptiveBlend = factorCovarianceAdaptiveBlend;
 
         if (factorCovarianceMode == 0)
         {
@@ -2100,6 +2261,18 @@ public:
         if (!factorCovarianceUseFullMatrix)
             covariance = covariance.diagonal().asDiagonal();
 
+        if (factorCovarianceScaleMode == 1)
+            covariance = blockTraceNormalizeToFixedCovariance(covariance);
+        else if (factorCovarianceScaleMode == 3)
+            covariance *= std::max(factorCovarianceGlobalMultiplier, 1e-12);
+
+        const double adaptiveBlend = std::clamp(factorCovarianceAdaptiveBlend, 0.0, 1.0);
+        if (adaptiveBlend < 1.0)
+        {
+            covariance = adaptiveBlend * covariance + (1.0 - adaptiveBlend) * fixedOdometryCovarianceLoam();
+            covariance = 0.5 * (covariance + covariance.transpose());
+        }
+
         if (!matrixFinite(covariance))
         {
             localDiagnostics.usedFallback = factorCovarianceFallbackToFixed;
@@ -2124,24 +2297,15 @@ public:
         }
 
         lastLidarFactorCovarianceLoam = covariance;
-        lastLidarFactorCovarianceGtsam = convertLoamCovarianceToGtsam(lastLidarFactorCovarianceLoam);
-        if (!matrixFinite(lastLidarFactorCovarianceGtsam))
-        {
-            localDiagnostics.usedFallback = factorCovarianceFallbackToFixed;
-            if (factorCovarianceFallbackToFixed)
-                setFixedLidarFactorCovarianceFallback();
-            lastFactorInformationDiagnostics = localDiagnostics;
-            if (diagnostics)
-                *diagnostics = localDiagnostics;
-            return false;
-        }
-
+        lastLidarFactorCovarianceGtsam = gtsam::Matrix6::Identity();
         lastLidarFactorCovarianceValid = true;
         lastLidarFactorCovarianceTimestamp = timeLaserInfoCur;
         lastLidarFactorSourceKeyframe = cloudKeyPoses3D->size();
         localDiagnostics.covarianceValid = true;
         localDiagnostics.covarianceDiagonal = covariance.diagonal();
         localDiagnostics.covarianceTrace = covariance.trace();
+        localDiagnostics.covarianceRotationTrace = covariance.block<3, 3>(0, 0).trace();
+        localDiagnostics.covarianceTranslationTrace = covariance.block<3, 3>(3, 3).trace();
 
         lastFactorInformationDiagnostics = localDiagnostics;
         if (diagnostics)
@@ -2330,6 +2494,22 @@ public:
             }
             const auto registrationEnd = std::chrono::steady_clock::now();
 
+            std::array<float, 6> transformBeforeUpdate{};
+            for (int i = 0; i < 6; ++i)
+                transformBeforeUpdate[i] = transformTobeMapped[i];
+
+            transformUpdate();
+
+            const double deltaRoll = normalizedAngleDifference(transformTobeMapped[0] - transformBeforeUpdate[0]);
+            const double deltaPitch = normalizedAngleDifference(transformTobeMapped[1] - transformBeforeUpdate[1]);
+            const double deltaYaw = normalizedAngleDifference(transformTobeMapped[2] - transformBeforeUpdate[2]);
+            const double transformUpdateDeltaRotationDeg = pcl::rad2deg(
+                std::sqrt(deltaRoll * deltaRoll + deltaPitch * deltaPitch + deltaYaw * deltaYaw));
+            const double dx = transformTobeMapped[3] - transformBeforeUpdate[3];
+            const double dy = transformTobeMapped[4] - transformBeforeUpdate[4];
+            const double dz = transformTobeMapped[5] - transformBeforeUpdate[5];
+            const double transformUpdateDeltaTranslationM = std::sqrt(dx * dx + dy * dy + dz * dz);
+
             const auto informationStart = std::chrono::steady_clock::now();
             finalCorrespondencesValid = computeFinalCorrespondencesAtConvergedPose();
             if (!finalCorrespondencesValid)
@@ -2348,9 +2528,9 @@ public:
                 std::chrono::duration<double, std::milli>(registrationEnd - registrationStart).count();
             lastFactorInformationDiagnostics.finalInformationRuntimeMs =
                 std::chrono::duration<double, std::milli>(informationEnd - informationStart).count();
+            lastFactorInformationDiagnostics.transformUpdateDeltaRotationDeg = transformUpdateDeltaRotationDeg;
+            lastFactorInformationDiagnostics.transformUpdateDeltaTranslationM = transformUpdateDeltaTranslationM;
             writeScanDiagnostics(cloudKeyPoses3D->size(), lastFactorInformationDiagnostics);
-
-            transformUpdate();
         } else {
             finalCorrespondences.clear();
             finalCorrespondencesValid = false;
@@ -2359,6 +2539,8 @@ public:
             diagnostics.timestamp = timeLaserInfoCur;
             diagnostics.registrationWeightMode = registrationWeightMode;
             diagnostics.factorCovarianceMode = factorCovarianceMode;
+            diagnostics.factorCovarianceScaleMode = factorCovarianceScaleMode;
+            diagnostics.factorCovarianceAdaptiveBlend = factorCovarianceAdaptiveBlend;
             diagnostics.numCorner = laserCloudCornerLastDSNum;
             diagnostics.numSurface = laserCloudSurfLastDSNum;
             diagnostics.isDegenerate = isDegenerate;
@@ -2504,28 +2686,48 @@ public:
             initialEstimate.insert(0, trans2gtsamPose(transformTobeMapped));
         }else{
             const int targetKeyframeIndex = cloudKeyPoses3D->size();
+            gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
+            gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
             const bool covarianceMatchesCurrentScan =
                 std::abs(lastLidarFactorCovarianceTimestamp - timeLaserInfoCur) < 1e-6 &&
                 lastLidarFactorSourceKeyframe == targetKeyframeIndex;
-            const bool useAdaptiveCovariance =
+            bool useAdaptiveCovariance =
                 factorCovarianceMode != 0 &&
                 lastLidarFactorCovarianceValid &&
-                covarianceMatchesCurrentScan &&
-                matrixFinite(lastLidarFactorCovarianceGtsam);
+                covarianceMatchesCurrentScan;
 
             gtsam::SharedNoiseModel odometryNoise;
             if (useAdaptiveCovariance)
             {
-                odometryNoise = noiseModel::Gaussian::Covariance(lastLidarFactorCovarianceGtsam);
+                std::string covarianceError;
+                const std::array<float, 6> currentLmPose = currentLmPoseArray();
+                useAdaptiveCovariance = convertLmPoseCovarianceToRelativeFactorCovariance(
+                    poseFrom,
+                    currentLmPose,
+                    lastLidarFactorCovarianceLoam,
+                    &lastLidarFactorCovarianceGtsam,
+                    &covarianceError);
+                if (useAdaptiveCovariance)
+                {
+                    odometryNoise = noiseModel::Gaussian::Covariance(lastLidarFactorCovarianceGtsam);
+                }
+                else
+                {
+                    RCLCPP_WARN_THROTTLE(
+                        get_logger(),
+                        *get_clock(),
+                        5000,
+                        "Adaptive covariance mapping failed; using fixed covariance. Reason: %s",
+                        covarianceError.c_str());
+                }
             }
-            else
+
+            if (!useAdaptiveCovariance)
             {
                 odometryNoise = noiseModel::Diagonal::Variances(
                     (Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
             }
 
-            gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
-            gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
             gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
             initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
             writeKeyframeFactorDiagnostics(targetKeyframeIndex, lastFactorInformationDiagnostics, !useAdaptiveCovariance);

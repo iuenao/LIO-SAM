@@ -1,0 +1,11 @@
+/**:
+  ros__parameters:
+    viEnabled: false
+    registrationWeightMode: 0
+    factorCovarianceMode: 1
+    factorCovarianceScaleMode: 1
+    degeneracyHessianMode: 0
+    robustKernelType: 0
+    adaptiveCovEnabled: false
+    adaptiveCovMode: 0
+    method_name: "raw_hessian_norm"

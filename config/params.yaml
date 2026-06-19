@@ -58,7 +58,12 @@
     factorCovarianceMode: 0                     # 0 fixed, 1 raw Hessian, 2 residual, 3 geometry, 4 split, 5 registration-weighted diagnostic
     degeneracyHessianMode: 0                    # 0: original Hessian, 1: registration-weighted Hessian
     factorCovarianceMinCorrespondences: 50
+    factorCovarianceScaleMode: 0                # 0 absolute sigma, 1 block-trace normalized, 2 online sigma, 3 global multiplier
     factorNominalResidualSigma: 1.0
+    factorCovarianceGlobalMultiplier: 1.0
+    factorCovarianceAdaptiveBlend: 1.0          # 1.0 pure adaptive covariance; lower values blend toward fixed covariance
+    factorOnlineSigmaMin: 0.01
+    factorOnlineSigmaMax: 2.0
     factorInformationDamping: 1.0e-6
     factorInformationEigenvalueMin: 1.0e-6
     factorInformationEigenvalueMax: 1.0e9
@@ -66,6 +71,8 @@
     factorCovarianceEigenvalueMax: 1.0e4
     factorCovarianceUseFullMatrix: true
     factorCovarianceFallbackToFixed: true
+    covarianceJacobianRotationEpsilon: 1.0e-6
+    covarianceJacobianTranslationEpsilon: 1.0e-5
     robustKernelType: 0                         # deprecated alias: 0 none/fixed, 1 Huber, 2 Cauchy
     huberDelta: 0.1
     cauchyC: 0.8

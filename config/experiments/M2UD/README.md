@@ -12,7 +12,15 @@ Main paper table:
 - `residual_only`
 - `geometry_cov_only`
 - `post_split_only`
+- `proposed_split_norm`
+
+Scale-attribution variants:
+
+- `raw_hessian_norm`
+- `post_split_only_norm`
 - `proposed_split`
+- `proposed_split_norm_blend80`
+- `proposed_split_norm_blend50`
 
 Failure-analysis table:
 
