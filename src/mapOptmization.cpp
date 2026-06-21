@@ -86,6 +86,8 @@ struct FactorInformationDiagnostics
     int factorCovarianceMode = 0;
     int factorCovarianceScaleMode = 0;
     double factorCovarianceAdaptiveBlend = 1.0;
+    bool factorCovarianceSafetyFloorEnabled = false;
+    bool factorCovarianceSafetyFloorApplied = false;
     int numCorner = 0;
     int numSurface = 0;
     int numTotal = 0;
@@ -101,6 +103,23 @@ struct FactorInformationDiagnostics
     double covarianceTrace = 0.0;
     double covarianceRotationTrace = 0.0;
     double covarianceTranslationTrace = 0.0;
+    double mappedCovarianceMinEigenvalueBeforeFloor = 0.0;
+    double mappedCovarianceMaxEigenvalueBeforeFloor = 0.0;
+    double mappedCovarianceMinEigenvalueAfterFloor = 0.0;
+    double mappedCovarianceMaxEigenvalueAfterFloor = 0.0;
+    double mappedCovarianceNormalizedMinEigenvalueBeforeFloor = 0.0;
+    double mappedCovarianceNormalizedMinEigenvalueAfterFloor = 0.0;
+    bool mappedFactorCovarianceAvailable = false;
+    bool factorCovarianceUsedAdaptive = false;
+    Eigen::Matrix<double, 6, 6> mappedFactorCovariance = Eigen::Matrix<double, 6, 6>::Zero();
+    double previousKeyframeTimestamp = 0.0;
+    double factorRelativeTx = 0.0;
+    double factorRelativeTy = 0.0;
+    double factorRelativeTz = 0.0;
+    double factorRelativeQx = 0.0;
+    double factorRelativeQy = 0.0;
+    double factorRelativeQz = 0.0;
+    double factorRelativeQw = 1.0;
     double rawConditionNumber = 0.0;
     double weightedConditionNumber = 0.0;
     bool covarianceValid = false;
@@ -217,6 +236,8 @@ public:
 
     std::ofstream trajectoryFile;
     std::ofstream tumTrajectoryFile;
+    std::filesystem::path trajectoryPath;
+    std::filesystem::path tumTrajectoryPath;
     std::ofstream reliabilityDiagnosticsFile;
     std::ofstream scanDiagnosticsFile;
     std::ofstream keyframeDiagnosticsFile;
@@ -395,7 +416,7 @@ public:
 
         if (enableTrajectoryCSV)
         {
-            std::filesystem::path trajectoryPath =
+            trajectoryPath =
                 std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_trajectory.csv");
             trajectoryFile.open(trajectoryPath, std::ios::out | std::ios::trunc);
             if (trajectoryFile.is_open())
@@ -412,17 +433,17 @@ public:
                 RCLCPP_WARN(get_logger(), "Failed to open trajectory CSV at %s", trajectoryPath.string().c_str());
             }
 
-            std::filesystem::path tumPath =
+            tumTrajectoryPath =
                 std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_tum.txt");
-            tumTrajectoryFile.open(tumPath, std::ios::out | std::ios::trunc);
+            tumTrajectoryFile.open(tumTrajectoryPath, std::ios::out | std::ios::trunc);
             if (tumTrajectoryFile.is_open())
             {
                 tumTrajectoryFileOpen = true;
-                RCLCPP_INFO(get_logger(), "TUM trajectory opened at %s", tumPath.string().c_str());
+                RCLCPP_INFO(get_logger(), "TUM trajectory opened at %s", tumTrajectoryPath.string().c_str());
             }
             else
             {
-                RCLCPP_WARN(get_logger(), "Failed to open TUM trajectory at %s", tumPath.string().c_str());
+                RCLCPP_WARN(get_logger(), "Failed to open TUM trajectory at %s", tumTrajectoryPath.string().c_str());
             }
         }
 
@@ -483,6 +504,7 @@ public:
         file
             << "timestamp,keyframe_index,registration_weight_mode,factor_covariance_mode,"
             << "factor_covariance_scale_mode,factor_covariance_adaptive_blend,"
+            << "factor_covariance_safety_floor_enabled,factor_covariance_safety_floor_applied,"
             << "num_corner,num_surface,num_total,"
             << "mean_abs_raw_residual,rmse_raw_residual,"
             << "mean_geometry_reliability,mean_residual_reliability,mean_combined_reliability,"
@@ -492,6 +514,15 @@ public:
             << "raw_condition_number,weighted_condition_number,"
             << "cov_0_0,cov_1_1,cov_2_2,cov_3_3,cov_4_4,cov_5_5,"
             << "covariance_trace,covariance_rotation_trace,covariance_translation_trace,"
+            << "mapped_cov_eig_min_before_floor,mapped_cov_eig_max_before_floor,"
+            << "mapped_cov_eig_min_after_floor,mapped_cov_eig_max_after_floor,"
+            << "mapped_cov_normalized_eig_min_before_floor,mapped_cov_normalized_eig_min_after_floor,"
+            << "mapped_covariance_available,factor_covariance_used_adaptive,previous_keyframe_timestamp,"
+            << "factor_rel_tx,factor_rel_ty,factor_rel_tz,factor_rel_qx,factor_rel_qy,factor_rel_qz,factor_rel_qw,";
+        for (int row = 0; row < 6; ++row)
+            for (int col = row; col < 6; ++col)
+                file << "mapped_cov_" << row << "_" << col << ",";
+        file
             << "covariance_valid,used_fixed_fallback,is_degenerate,"
             << "lm_iterations,registration_runtime_ms,factor_information_runtime_ms,"
             << "transform_update_delta_rotation_deg,transform_update_delta_translation_m"
@@ -511,6 +542,8 @@ public:
              << diagnostics.factorCovarianceMode << ","
              << diagnostics.factorCovarianceScaleMode << ","
              << diagnostics.factorCovarianceAdaptiveBlend << ","
+             << (diagnostics.factorCovarianceSafetyFloorEnabled ? 1 : 0) << ","
+             << (diagnostics.factorCovarianceSafetyFloorApplied ? 1 : 0) << ","
              << diagnostics.numCorner << ","
              << diagnostics.numSurface << ","
              << diagnostics.numTotal << ","
@@ -534,6 +567,26 @@ public:
              << diagnostics.covarianceTrace << ","
              << diagnostics.covarianceRotationTrace << ","
              << diagnostics.covarianceTranslationTrace << ","
+             << diagnostics.mappedCovarianceMinEigenvalueBeforeFloor << ","
+             << diagnostics.mappedCovarianceMaxEigenvalueBeforeFloor << ","
+             << diagnostics.mappedCovarianceMinEigenvalueAfterFloor << ","
+             << diagnostics.mappedCovarianceMaxEigenvalueAfterFloor << ","
+             << diagnostics.mappedCovarianceNormalizedMinEigenvalueBeforeFloor << ","
+             << diagnostics.mappedCovarianceNormalizedMinEigenvalueAfterFloor << ","
+             << (diagnostics.mappedFactorCovarianceAvailable ? 1 : 0) << ","
+             << (diagnostics.factorCovarianceUsedAdaptive ? 1 : 0) << ","
+             << diagnostics.previousKeyframeTimestamp << ","
+             << diagnostics.factorRelativeTx << ","
+             << diagnostics.factorRelativeTy << ","
+             << diagnostics.factorRelativeTz << ","
+             << diagnostics.factorRelativeQx << ","
+             << diagnostics.factorRelativeQy << ","
+             << diagnostics.factorRelativeQz << ","
+             << diagnostics.factorRelativeQw;
+        for (int row = 0; row < 6; ++row)
+            for (int col = row; col < 6; ++col)
+                file << "," << diagnostics.mappedFactorCovariance(row, col);
+        file << ","
              << (diagnostics.covarianceValid ? 1 : 0) << ","
              << (usedFixedFallback ? 1 : 0) << ","
              << (diagnostics.isDegenerate ? 1 : 0) << ","
@@ -626,6 +679,51 @@ public:
                               << q.x() << " " << q.y() << " " << q.z() << " " << q.w()
                               << '\n';
         }
+    }
+
+    void rewriteTrajectoryLogs()
+    {
+        if (!enableTrajectoryCSV)
+            return;
+
+        if (trajectoryFile.is_open())
+            trajectoryFile.close();
+        if (tumTrajectoryFile.is_open())
+            tumTrajectoryFile.close();
+        trajectoryFileOpen = false;
+        tumTrajectoryFileOpen = false;
+
+        trajectoryFile.open(trajectoryPath, std::ios::out | std::ios::trunc);
+        if (trajectoryFile.is_open())
+        {
+            trajectoryFileOpen = true;
+            trajectoryFile
+                << "timestamp,x,y,z,qx,qy,qz,qw,roll,pitch,yaw,"
+                << "run_id,dataset_name,sequence_name,method_name,config_file,bag_name"
+                << '\n';
+        }
+        else
+        {
+            RCLCPP_WARN(get_logger(), "Failed to rewrite trajectory CSV at %s", trajectoryPath.string().c_str());
+        }
+
+        tumTrajectoryFile.open(tumTrajectoryPath, std::ios::out | std::ios::trunc);
+        if (tumTrajectoryFile.is_open())
+            tumTrajectoryFileOpen = true;
+        else
+            RCLCPP_WARN(get_logger(), "Failed to rewrite TUM trajectory at %s", tumTrajectoryPath.string().c_str());
+
+        for (const auto& pose : cloudKeyPoses6D->points)
+        {
+            tf2::Quaternion q;
+            q.setRPY(pose.roll, pose.pitch, pose.yaw);
+            writeTrajectoryLogs(pose, q);
+        }
+
+        if (trajectoryFileOpen)
+            trajectoryFile.flush();
+        if (tumTrajectoryFileOpen)
+            tumTrajectoryFile.flush();
     }
 
     void allocateMemory()
@@ -1625,6 +1723,103 @@ public:
         return true;
     }
 
+    bool applyRelativeFactorCovarianceSafetyFloor(
+        gtsam::Matrix6* covarianceRelative,
+        FactorInformationDiagnostics* diagnostics,
+        std::string* errorMessage) const
+    {
+        if (!covarianceRelative)
+        {
+            if (errorMessage)
+                *errorMessage = "null relative covariance for safety floor";
+            return false;
+        }
+
+        gtsam::Matrix6 covariance = 0.5 * (*covarianceRelative + covarianceRelative->transpose());
+        Eigen::SelfAdjointEigenSolver<gtsam::Matrix6> beforeSolver(covariance);
+        if (!matrixFinite(covariance) || beforeSolver.info() != Eigen::Success ||
+            beforeSolver.eigenvalues().minCoeff() <= 0.0)
+        {
+            if (errorMessage)
+                *errorMessage = "invalid mapped covariance before safety floor";
+            return false;
+        }
+
+        if (diagnostics)
+        {
+            diagnostics->factorCovarianceSafetyFloorEnabled = factorCovarianceSafetyFloorEnabled;
+            diagnostics->factorCovarianceSafetyFloorApplied = false;
+            diagnostics->mappedCovarianceMinEigenvalueBeforeFloor = beforeSolver.eigenvalues().minCoeff();
+            diagnostics->mappedCovarianceMaxEigenvalueBeforeFloor = beforeSolver.eigenvalues().maxCoeff();
+        }
+
+        const double rotationFloor = std::max(factorCovarianceRotationVarianceFloor, 1e-18);
+        const double translationFloor = std::max(factorCovarianceTranslationVarianceFloor, 1e-18);
+        gtsam::Matrix6 floorSqrt = gtsam::Matrix6::Zero();
+        gtsam::Matrix6 floorInvSqrt = gtsam::Matrix6::Zero();
+        for (int i = 0; i < 6; ++i)
+        {
+            const double varianceFloor = i < 3 ? rotationFloor : translationFloor;
+            floorSqrt(i, i) = std::sqrt(varianceFloor);
+            floorInvSqrt(i, i) = 1.0 / floorSqrt(i, i);
+        }
+
+        gtsam::Matrix6 normalized = floorInvSqrt * covariance * floorInvSqrt;
+        normalized = 0.5 * (normalized + normalized.transpose());
+        Eigen::SelfAdjointEigenSolver<gtsam::Matrix6> normalizedSolver(normalized);
+        if (!matrixFinite(normalized) || normalizedSolver.info() != Eigen::Success)
+        {
+            if (errorMessage)
+                *errorMessage = "failed to decompose normalized mapped covariance";
+            return false;
+        }
+
+        Eigen::Matrix<double, 6, 1> normalizedEigenvalues = normalizedSolver.eigenvalues();
+        if (diagnostics)
+            diagnostics->mappedCovarianceNormalizedMinEigenvalueBeforeFloor = normalizedEigenvalues.minCoeff();
+
+        bool floorApplied = false;
+        if (factorCovarianceSafetyFloorEnabled)
+        {
+            for (int i = 0; i < 6; ++i)
+            {
+                if (normalizedEigenvalues(i) < 1.0 - 1e-12)
+                    floorApplied = true;
+                normalizedEigenvalues(i) = std::max(normalizedEigenvalues(i), 1.0);
+            }
+
+            normalized = normalizedSolver.eigenvectors() * normalizedEigenvalues.asDiagonal() *
+                         normalizedSolver.eigenvectors().transpose();
+            covariance = floorSqrt * normalized * floorSqrt;
+            covariance = 0.5 * (covariance + covariance.transpose());
+        }
+
+        Eigen::SelfAdjointEigenSolver<gtsam::Matrix6> afterSolver(covariance);
+        gtsam::Matrix6 normalizedAfter = floorInvSqrt * covariance * floorInvSqrt;
+        normalizedAfter = 0.5 * (normalizedAfter + normalizedAfter.transpose());
+        Eigen::SelfAdjointEigenSolver<gtsam::Matrix6> normalizedAfterSolver(normalizedAfter);
+        if (!matrixFinite(covariance) || afterSolver.info() != Eigen::Success ||
+            afterSolver.eigenvalues().minCoeff() <= 0.0 ||
+            normalizedAfterSolver.info() != Eigen::Success)
+        {
+            if (errorMessage)
+                *errorMessage = "invalid mapped covariance after safety floor";
+            return false;
+        }
+
+        if (diagnostics)
+        {
+            diagnostics->factorCovarianceSafetyFloorApplied = floorApplied;
+            diagnostics->mappedCovarianceMinEigenvalueAfterFloor = afterSolver.eigenvalues().minCoeff();
+            diagnostics->mappedCovarianceMaxEigenvalueAfterFloor = afterSolver.eigenvalues().maxCoeff();
+            diagnostics->mappedCovarianceNormalizedMinEigenvalueAfterFloor =
+                normalizedAfterSolver.eigenvalues().minCoeff();
+        }
+
+        *covarianceRelative = covariance;
+        return true;
+    }
+
     void setFixedLidarFactorCovarianceFallback()
     {
         lastLidarFactorCovarianceLoam = fixedOdometryCovarianceLoam();
@@ -2134,6 +2329,7 @@ public:
         localDiagnostics.factorCovarianceMode = factorCovarianceMode;
         localDiagnostics.factorCovarianceScaleMode = factorCovarianceScaleMode;
         localDiagnostics.factorCovarianceAdaptiveBlend = factorCovarianceAdaptiveBlend;
+        localDiagnostics.factorCovarianceSafetyFloorEnabled = factorCovarianceSafetyFloorEnabled;
 
         if (factorCovarianceMode == 0)
         {
@@ -2541,6 +2737,7 @@ public:
             diagnostics.factorCovarianceMode = factorCovarianceMode;
             diagnostics.factorCovarianceScaleMode = factorCovarianceScaleMode;
             diagnostics.factorCovarianceAdaptiveBlend = factorCovarianceAdaptiveBlend;
+            diagnostics.factorCovarianceSafetyFloorEnabled = factorCovarianceSafetyFloorEnabled;
             diagnostics.numCorner = laserCloudCornerLastDSNum;
             diagnostics.numSurface = laserCloudSurfLastDSNum;
             diagnostics.isDegenerate = isDegenerate;
@@ -2688,6 +2885,16 @@ public:
             const int targetKeyframeIndex = cloudKeyPoses3D->size();
             gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
             gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
+            const gtsam::Pose3 relativeMeasurement = poseFrom.between(poseTo);
+            const auto relativeQuaternion = relativeMeasurement.rotation().toQuaternion();
+            lastFactorInformationDiagnostics.previousKeyframeTimestamp = cloudKeyPoses6D->points.back().time;
+            lastFactorInformationDiagnostics.factorRelativeTx = relativeMeasurement.translation().x();
+            lastFactorInformationDiagnostics.factorRelativeTy = relativeMeasurement.translation().y();
+            lastFactorInformationDiagnostics.factorRelativeTz = relativeMeasurement.translation().z();
+            lastFactorInformationDiagnostics.factorRelativeQx = relativeQuaternion.x();
+            lastFactorInformationDiagnostics.factorRelativeQy = relativeQuaternion.y();
+            lastFactorInformationDiagnostics.factorRelativeQz = relativeQuaternion.z();
+            lastFactorInformationDiagnostics.factorRelativeQw = relativeQuaternion.w();
             const bool covarianceMatchesCurrentScan =
                 std::abs(lastLidarFactorCovarianceTimestamp - timeLaserInfoCur) < 1e-6 &&
                 lastLidarFactorSourceKeyframe == targetKeyframeIndex;
@@ -2707,12 +2914,20 @@ public:
                     lastLidarFactorCovarianceLoam,
                     &lastLidarFactorCovarianceGtsam,
                     &covarianceError);
+                if (useAdaptiveCovariance && factorCovarianceSafetyFloorEnabled)
+                {
+                    useAdaptiveCovariance = applyRelativeFactorCovarianceSafetyFloor(
+                        &lastLidarFactorCovarianceGtsam,
+                        &lastFactorInformationDiagnostics,
+                        &covarianceError);
+                }
                 if (useAdaptiveCovariance)
                 {
                     odometryNoise = noiseModel::Gaussian::Covariance(lastLidarFactorCovarianceGtsam);
                 }
                 else
                 {
+                    lastFactorInformationDiagnostics.covarianceValid = false;
                     RCLCPP_WARN_THROTTLE(
                         get_logger(),
                         *get_clock(),
@@ -2728,7 +2943,12 @@ public:
                     (Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
             }
 
-            gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
+            lastFactorInformationDiagnostics.mappedFactorCovarianceAvailable = true;
+            lastFactorInformationDiagnostics.factorCovarianceUsedAdaptive = useAdaptiveCovariance;
+            lastFactorInformationDiagnostics.mappedFactorCovariance =
+                useAdaptiveCovariance ? lastLidarFactorCovarianceGtsam : fixedOdometryCovarianceLoam();
+
+            gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), relativeMeasurement, odometryNoise));
             initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
             writeKeyframeFactorDiagnostics(targetKeyframeIndex, lastFactorInformationDiagnostics, !useAdaptiveCovariance);
         }
@@ -2950,14 +3170,15 @@ public:
                 cloudKeyPoses6D->points[i].pitch = isamCurrentEstimate.at<Pose3>(i).rotation().pitch();
                 cloudKeyPoses6D->points[i].yaw   = isamCurrentEstimate.at<Pose3>(i).rotation().yaw();
 
-                updatePath(cloudKeyPoses6D->points[i]);
+                updatePath(cloudKeyPoses6D->points[i], false);
             }
 
+            rewriteTrajectoryLogs();
             aLoopIsClosed = false;
         }
     }
 
-    void updatePath(const PointTypePose& pose_in)
+    void updatePath(const PointTypePose& pose_in, bool writeLog = true)
     {
         geometry_msgs::msg::PoseStamped pose_stamped;
         pose_stamped.header.stamp = rclcpp::Time(pose_in.time * 1e9);
@@ -2973,7 +3194,8 @@ public:
         pose_stamped.pose.orientation.w = q.w();
 
         globalPath.poses.push_back(pose_stamped);
-        writeTrajectoryLogs(pose_in, q);
+        if (writeLog)
+            writeTrajectoryLogs(pose_in, q);
     }
 
     void publishOdometry()

@@ -70,6 +70,9 @@
     factorNominalResidualSigma: 1.0
     factorCovarianceGlobalMultiplier: 1.0
     factorCovarianceAdaptiveBlend: 1.0
+    factorCovarianceSafetyFloorEnabled: false
+    factorCovarianceRotationVarianceFloor: 1.0e-6
+    factorCovarianceTranslationVarianceFloor: 1.0e-4
     factorOnlineSigmaMin: 0.01
     factorOnlineSigmaMax: 2.0
     factorInformationDamping: 1.0e-6

@@ -95,6 +95,10 @@ install(
   PROGRAMS
     scripts/run_ablation_bags.py
     scripts/evaluate_tum_trajectories.py
+    scripts/evaluate_common_grid.py
+    scripts/aggregate_repeated_ape.py
+    scripts/reliability_analysis/compute_factor_nees.py
+    scripts/reliability_analysis/compare_m2ud_gt_frames.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

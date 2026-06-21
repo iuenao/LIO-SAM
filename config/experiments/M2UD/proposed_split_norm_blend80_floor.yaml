@@ -1,0 +1,16 @@
+/**:
+  ros__parameters:
+    viEnabled: false
+    registrationWeightMode: 3
+    factorCovarianceMode: 4
+    factorCovarianceScaleMode: 1
+    factorCovarianceAdaptiveBlend: 0.8
+    factorCovarianceSafetyFloorEnabled: true
+    factorCovarianceRotationVarianceFloor: 1.0e-6
+    factorCovarianceTranslationVarianceFloor: 1.0e-4
+    degeneracyHessianMode: 0
+    robustKernelType: 0
+    huberDelta: 0.1
+    adaptiveCovEnabled: false
+    adaptiveCovMode: 0
+    method_name: "proposed_split_norm_blend80_floor"

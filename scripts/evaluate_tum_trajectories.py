@@ -68,6 +68,49 @@ def first_last_timestamp(path: Path) -> tuple[float, float]:
     return first, last
 
 
+def sanitize_tum_file(path: Path, output_dir: Path) -> Path:
+    records: list[tuple[float, str]] = []
+    previous_timestamp = None
+    non_monotonic = False
+
+    with path.open("r", encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            fields = stripped.split()
+            if len(fields) != 8:
+                raise ValueError(f"Invalid TUM row in {path}:{line_number}: expected 8 fields")
+            timestamp = float(fields[0])
+            if previous_timestamp is not None and timestamp <= previous_timestamp:
+                non_monotonic = True
+            previous_timestamp = timestamp
+            records.append((timestamp, stripped))
+
+    if not records:
+        raise ValueError(f"No TUM poses found in {path}")
+
+    latest_by_timestamp: dict[float, str] = {}
+    for timestamp, line in records:
+        latest_by_timestamp[timestamp] = line
+    duplicate_count = len(records) - len(latest_by_timestamp)
+
+    if not non_monotonic and duplicate_count == 0:
+        return path
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sanitized_path = output_dir / path.name
+    with sanitized_path.open("w", encoding="utf-8") as f:
+        for timestamp in sorted(latest_by_timestamp):
+            f.write(latest_by_timestamp[timestamp] + "\n")
+
+    print(
+        f"Sanitized {path.name}: {len(records)} rows -> {len(latest_by_timestamp)} poses "
+        f"({duplicate_count} duplicate rows removed); using {sanitized_path}"
+    )
+    return sanitized_path
+
+
 def build_time_args(args: argparse.Namespace, gt: Path, trajectory_files: List[Path]) -> str:
     if args.t_start is not None or args.t_end is not None:
         parts = []
@@ -118,6 +161,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plot-mode", default="xy")
     parser.add_argument("--prefix", default=None)
     parser.add_argument(
+        "--no-sanitize-timestamps",
+        action="store_true",
+        help="Disable automatic non-monotonic/duplicate TUM timestamp sanitation.",
+    )
+    parser.add_argument(
         "--include",
         nargs="*",
         type=Path,
@@ -161,6 +209,10 @@ def main() -> int:
     prefix = args.prefix or infer_sequence_name(tum_dir, trajectory_files)
     result_dir = tum_dir / "ape_results"
     result_dir.mkdir(parents=True, exist_ok=True)
+    if not args.no_sanitize_timestamps:
+        trajectory_files = [
+            sanitize_tum_file(path, result_dir / "sanitized") for path in trajectory_files
+        ]
     time_args = build_time_args(args, gt, trajectory_files)
     if time_args:
         print(f"Using evo time filter: {time_args}")

@@ -134,6 +134,9 @@ public:
     double factorNominalResidualSigma;
     double factorCovarianceGlobalMultiplier;
     double factorCovarianceAdaptiveBlend;
+    bool factorCovarianceSafetyFloorEnabled;
+    double factorCovarianceRotationVarianceFloor;
+    double factorCovarianceTranslationVarianceFloor;
     double factorOnlineSigmaMin;
     double factorOnlineSigmaMax;
     double factorInformationDamping;
@@ -328,6 +331,12 @@ public:
         get_parameter("factorCovarianceGlobalMultiplier", factorCovarianceGlobalMultiplier);
         declare_parameter("factorCovarianceAdaptiveBlend", 1.0);
         get_parameter("factorCovarianceAdaptiveBlend", factorCovarianceAdaptiveBlend);
+        declare_parameter("factorCovarianceSafetyFloorEnabled", false);
+        get_parameter("factorCovarianceSafetyFloorEnabled", factorCovarianceSafetyFloorEnabled);
+        declare_parameter("factorCovarianceRotationVarianceFloor", 1.0e-6);
+        get_parameter("factorCovarianceRotationVarianceFloor", factorCovarianceRotationVarianceFloor);
+        declare_parameter("factorCovarianceTranslationVarianceFloor", 1.0e-4);
+        get_parameter("factorCovarianceTranslationVarianceFloor", factorCovarianceTranslationVarianceFloor);
         declare_parameter("factorOnlineSigmaMin", 0.01);
         get_parameter("factorOnlineSigmaMin", factorOnlineSigmaMin);
         declare_parameter("factorOnlineSigmaMax", 2.0);

@@ -62,6 +62,9 @@
     factorNominalResidualSigma: 1.0
     factorCovarianceGlobalMultiplier: 1.0
     factorCovarianceAdaptiveBlend: 1.0          # 1.0 pure adaptive covariance; lower values blend toward fixed covariance
+    factorCovarianceSafetyFloorEnabled: false   # optional final relative-factor covariance floor
+    factorCovarianceRotationVarianceFloor: 1.0e-6
+    factorCovarianceTranslationVarianceFloor: 1.0e-4
     factorOnlineSigmaMin: 0.01
     factorOnlineSigmaMax: 2.0
     factorInformationDamping: 1.0e-6
