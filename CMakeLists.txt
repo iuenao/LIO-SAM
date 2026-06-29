@@ -99,6 +99,7 @@ install(
     scripts/aggregate_repeated_ape.py
     scripts/reliability_analysis/compute_factor_nees.py
     scripts/reliability_analysis/compare_m2ud_gt_frames.py
+    scripts/reliability_analysis/evaluate_cluster_robust_covariance.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

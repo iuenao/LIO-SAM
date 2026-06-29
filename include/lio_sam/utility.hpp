@@ -132,6 +132,7 @@ public:
     int factorCovarianceMinCorrespondences;
     int factorCovarianceScaleMode;
     double factorNominalResidualSigma;
+    double factorRangeNoiseAlpha;
     double factorCovarianceGlobalMultiplier;
     double factorCovarianceAdaptiveBlend;
     bool factorCovarianceSafetyFloorEnabled;
@@ -327,6 +328,8 @@ public:
         get_parameter("factorCovarianceScaleMode", factorCovarianceScaleMode);
         declare_parameter("factorNominalResidualSigma", 1.0);
         get_parameter("factorNominalResidualSigma", factorNominalResidualSigma);
+        declare_parameter("factorRangeNoiseAlpha", 0.0);
+        get_parameter("factorRangeNoiseAlpha", factorRangeNoiseAlpha);
         declare_parameter("factorCovarianceGlobalMultiplier", 1.0);
         get_parameter("factorCovarianceGlobalMultiplier", factorCovarianceGlobalMultiplier);
         declare_parameter("factorCovarianceAdaptiveBlend", 1.0);

@@ -59,6 +59,7 @@
     factorCovarianceMinCorrespondences: 50
     factorCovarianceScaleMode: 0
     factorNominalResidualSigma: 1.0
+    factorRangeNoiseAlpha: 0.17  # Per-sensor coefficient calibrated once and held fixed across sequences.
     factorCovarianceGlobalMultiplier: 1.0
     factorCovarianceAdaptiveBlend: 1.0
     factorCovarianceSafetyFloorEnabled: false
@@ -91,6 +92,7 @@
     enableTrajectoryCSV: false
     enableDiagnosticsCSV: false
     enablePointLevelReliabilityCSV: false
+    enablePerCorrespondenceCSV: false  # Offline covariance feasibility logging only.
     diagnosticsOutputDir: "/tmp/lio_sam_reliability"
     diagnosticsFilePrefix: "m2dgr"
     run_id: "m2dgr_method_seed"

@@ -60,6 +60,7 @@
     factorCovarianceMinCorrespondences: 50
     factorCovarianceScaleMode: 0                # 0 absolute sigma, 1 block-trace normalized, 2 online sigma, 3 global multiplier
     factorNominalResidualSigma: 1.0
+    factorRangeNoiseAlpha: 0.0                  # per-sensor range-noise coefficient; 0.0 = classical Hessian covariance
     factorCovarianceGlobalMultiplier: 1.0
     factorCovarianceAdaptiveBlend: 1.0          # 1.0 pure adaptive covariance; lower values blend toward fixed covariance
     factorCovarianceSafetyFloorEnabled: false   # optional final relative-factor covariance floor
@@ -93,6 +94,7 @@
     enableTrajectoryCSV: false
     enableDiagnosticsCSV: false
     enablePointLevelReliabilityCSV: false
+    enablePerCorrespondenceCSV: false  # Offline covariance feasibility logging only.
     diagnosticsOutputDir: "/tmp/lio_sam_reliability"
     diagnosticsFilePrefix: "run"
     run_id: "run_method_seed"

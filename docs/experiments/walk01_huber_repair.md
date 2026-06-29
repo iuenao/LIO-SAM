@@ -54,3 +54,38 @@ seconds.
 
 Proposed split is best, although its margin over geometry registration is only 0.1% and
 its margin over fixed is 1.9%.
+
+## Corrected factor NEES
+
+Walk01 GT positions are ECEF while the Xsens attitude is treated as local ENU. Run this
+command for each covariance method by changing `METHOD`:
+
+```bash
+METHOD=proposed_split
+ros2 run lio_sam compute_factor_nees.py \
+  --factors "/home/unitree/ros2_workspaces/lio_ws/lio_sam_logs/M2DGR/walk01_absolute_120s/${METHOD}/walk01_absolute_120s_${METHOD}_keyframe_factors.csv" \
+  --gt /home/unitree/ros2_workspaces/lio_ws/trajectory_save/M2DGR/walk_01/gt.txt \
+  --output-dir "/home/unitree/ros2_workspaces/lio_ws/lio_sam_logs/M2DGR/walk01_absolute_120s/${METHOD}/factor_confidence_enu_xsens" \
+  --dataset M2DGR \
+  --sequence walk01_absolute_120s \
+  --method "${METHOD}" \
+  --run-id "walk01_absolute_120s_${METHOD}_enu_xsens" \
+  --gt-position-coordinates ecef \
+  --gt-orientation-coordinates local \
+  --gt-to-factor-translation -0.15905 -0.00067 0.16824 \
+  --gt-to-factor-rpy-deg 0 0 0 \
+  --frame-hypothesis m2dgr_xsens_enu_to_lidar \
+  --confirm-same-body-frame
+```
+
+| method | mean NEES | normalized NEES | mean NLL | upper 95% coverage | translation error (m) |
+|---|---:|---:|---:|---:|---:|
+| fixed | **104.17** | **17.36** | **23.06** | 17.95% | 0.0590 |
+| raw Hessian | 276.14 | 46.02 | 108.95 | 11.27% | 0.0622 |
+| residual only | 170.33 | 28.39 | 56.71 | 12.82% | 0.0606 |
+| geometry covariance only | 220.53 | 36.75 | 81.77 | 14.29% | 0.0641 |
+| post split only | 179.90 | 29.98 | 62.04 | **22.37%** | 0.0635 |
+| proposed split | 148.87 | 24.81 | 46.56 | 20.00% | **0.0587** |
+
+All methods are strongly overconfident. Fixed has the best mean NEES/NLL; proposed has
+the lowest translation disagreement but does not provide the best calibrated covariance.

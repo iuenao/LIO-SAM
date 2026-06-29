@@ -73,6 +73,18 @@ METHODS: Dict[str, Dict[str, object]] = {
         "reliabilityDiagnosticsStride": 10,
         "method_name": "raw_hessian",
     },
+    "range_aware": {
+        "viEnabled": False,
+        "registrationWeightMode": 0,
+        "factorCovarianceMode": 1,
+        "factorCovarianceScaleMode": 0,
+        "degeneracyHessianMode": 0,
+        "robustKernelType": 0,
+        "adaptiveCovEnabled": False,
+        "adaptiveCovMode": 0,
+        "reliabilityDiagnosticsStride": 10,
+        "method_name": "range_aware",
+    },
     "residual_only": {
         "viEnabled": False,
         "registrationWeightMode": 0,
@@ -392,11 +404,14 @@ def write_method_config(
     method: str,
     bag: Path,
     run_dir: Path,
+    enable_per_correspondence_csv: bool = False,
 ) -> str:
     data = load_ros_params(base_config)
     params = data["/**"]["ros__parameters"]
     prefix = f"{sanitize_name(sequence)}_{method}"
 
+    if method != "range_aware":
+        params["factorRangeNoiseAlpha"] = 0.0
     params.update(METHODS[method])
     params.update(
         {
@@ -410,6 +425,7 @@ def write_method_config(
             "enableDiagnosticsCSV": True,
             "enableTrajectoryCSV": True,
             "enablePointLevelReliabilityCSV": False,
+            "enablePerCorrespondenceCSV": enable_per_correspondence_csv,
         }
     )
 
@@ -509,7 +525,14 @@ def run_method(args: argparse.Namespace, method: str) -> bool:
         return True
 
     prefix = write_method_config(
-        args.config.expanduser().resolve(), config_path, dataset, sequence, method, bag, run_dir
+        args.config.expanduser().resolve(),
+        config_path,
+        dataset,
+        sequence,
+        method,
+        bag,
+        run_dir,
+        enable_per_correspondence_csv=args.enable_per_correspondence_csv,
     )
 
     setup = shell_setup_command(workspace, args.setup)
@@ -598,6 +621,11 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         default=[],
         help='Extra launch args, e.g. "ground_pitch:=-0.04"',
+    )
+    parser.add_argument(
+        "--enable-per-correspondence-csv",
+        action="store_true",
+        help="Log final correspondences and LM-to-factor Jacobians for offline covariance experiments.",
     )
     parser.add_argument("--workspace", type=Path, default=Path.cwd(), help="ROS workspace root")
     parser.add_argument(

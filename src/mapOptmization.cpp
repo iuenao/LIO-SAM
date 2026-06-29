@@ -75,6 +75,9 @@ struct FinalCorrespondence
     double rawResidual = 0.0;
     double lioSamBaseScale = 1.0;
     Eigen::Matrix<double, 1, 6> baseJacobian = Eigen::Matrix<double, 1, 6>::Zero();
+    Eigen::Vector3d sensorPoint = Eigen::Vector3d::Zero();
+    double sensorRange = 0.0;
+    Eigen::Vector3d mapPoint = Eigen::Vector3d::Zero();
     double geometryReliability = 1.0;
     double residualReliability = 1.0;
 };
@@ -97,6 +100,8 @@ struct FactorInformationDiagnostics
     double meanResidualReliability = 1.0;
     double meanCombinedReliability = 1.0;
     double effectiveCorrespondenceRatio = 1.0;
+    double factorRangeNoiseAlpha = 0.0;
+    double meanRangeWeight = 1.0;
     Eigen::Matrix<double, 6, 1> rawInformationEigenvalues = Eigen::Matrix<double, 6, 1>::Zero();
     Eigen::Matrix<double, 6, 1> weightedInformationEigenvalues = Eigen::Matrix<double, 6, 1>::Zero();
     Eigen::Matrix<double, 6, 1> covarianceDiagonal = Eigen::Matrix<double, 6, 1>::Zero();
@@ -194,6 +199,8 @@ public:
     int lastLidarFactorSourceKeyframe = -1;
     Eigen::Matrix<double, 6, 6> lastRawInformation = Eigen::Matrix<double, 6, 6>::Zero();
     Eigen::Matrix<double, 6, 6> lastWeightedInformation = Eigen::Matrix<double, 6, 6>::Zero();
+    Eigen::Matrix<double, 6, 6> lastLmToFactorJacobian = Eigen::Matrix<double, 6, 6>::Identity();
+    bool lastLmToFactorJacobianValid = false;
     FactorInformationDiagnostics lastFactorInformationDiagnostics;
     bool covarianceConversionSelfTestPassed = false;
 
@@ -241,14 +248,19 @@ public:
     std::ofstream reliabilityDiagnosticsFile;
     std::ofstream scanDiagnosticsFile;
     std::ofstream keyframeDiagnosticsFile;
+    std::ofstream correspondenceDiagnosticsFile;
+    std::ofstream lmToFactorJacobianFile;
     bool trajectoryFileOpen = false;
     bool tumTrajectoryFileOpen = false;
     bool reliabilityDiagnosticsFileOpen = false;
     bool scanDiagnosticsFileOpen = false;
     bool keyframeDiagnosticsFileOpen = false;
+    bool correspondenceDiagnosticsFileOpen = false;
+    bool lmToFactorJacobianFileOpen = false;
     bool enableTrajectoryCSV = false;
     bool enableDiagnosticsCSV = false;
     bool enablePointLevelReliabilityCSV = false;
+    bool enablePerCorrespondenceCSV = false;
     std::string diagnosticsOutputDir;
     std::string diagnosticsFilePrefix;
     std::string runId;
@@ -380,6 +392,19 @@ public:
 
         covarianceConversionSelfTestPassed = runCovarianceConversionSelfTest();
 
+        if (factorRangeNoiseAlpha < 0.0)
+        {
+            RCLCPP_WARN(
+                get_logger(),
+                "factorRangeNoiseAlpha=%.6f is invalid; disabling range weighting.",
+                factorRangeNoiseAlpha);
+            factorRangeNoiseAlpha = 0.0;
+        }
+        RCLCPP_INFO(
+            get_logger(),
+            "Factor range-noise coefficient alpha: %.6f (0.0 = classical Hessian covariance)",
+            factorRangeNoiseAlpha);
+
         initialiseLoggers();
     }
 
@@ -388,6 +413,7 @@ public:
         enableTrajectoryCSV = declare_parameter<bool>("enableTrajectoryCSV", false);
         enableDiagnosticsCSV = declare_parameter<bool>("enableDiagnosticsCSV", false);
         enablePointLevelReliabilityCSV = declare_parameter<bool>("enablePointLevelReliabilityCSV", false);
+        enablePerCorrespondenceCSV = declare_parameter<bool>("enablePerCorrespondenceCSV", false);
         diagnosticsOutputDir = declare_parameter<std::string>(
             "diagnosticsOutputDir", "/home/unitree/ros2_workspaces/lio_ws/lio_sam_logs");
         diagnosticsFilePrefix = declare_parameter<std::string>("diagnosticsFilePrefix", "run");
@@ -398,7 +424,7 @@ public:
         configFile = declare_parameter<std::string>("config_file", "unknown");
         bagName = declare_parameter<std::string>("bag_name", "unknown");
 
-        if (!enableTrajectoryCSV && !enableDiagnosticsCSV)
+        if (!enableTrajectoryCSV && !enableDiagnosticsCSV && !enablePerCorrespondenceCSV)
             return;
 
         std::error_code ec;
@@ -411,7 +437,7 @@ public:
             return;
         }
 
-        if (enableDiagnosticsCSV)
+        if (enableDiagnosticsCSV || enablePerCorrespondenceCSV)
             saveConfigSnapshot();
 
         if (enableTrajectoryCSV)
@@ -497,6 +523,48 @@ public:
                 }
             }
         }
+
+        if (enablePerCorrespondenceCSV)
+        {
+            const std::filesystem::path correspondencePath =
+                std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_correspondences.csv");
+            correspondenceDiagnosticsFile.open(correspondencePath, std::ios::out | std::ios::trunc);
+            if (correspondenceDiagnosticsFile.is_open())
+            {
+                correspondenceDiagnosticsFileOpen = true;
+                correspondenceDiagnosticsFile
+                    << "keyframe_index,timestamp,correspondence_index,feature_type,"
+                    << "sensor_x,sensor_y,sensor_z,map_x,map_y,map_z,"
+                    << "raw_residual,lio_sam_base_scale,scaled_residual,"
+                    << "geometry_reliability,residual_reliability,factor_weight,"
+                    << "sensor_range,range_weight,"
+                    << "j0,j1,j2,j3,j4,j5"
+                    << '\n';
+                RCLCPP_INFO(get_logger(), "Per-correspondence CSV opened at %s", correspondencePath.string().c_str());
+            }
+            else
+            {
+                RCLCPP_WARN(get_logger(), "Failed to open per-correspondence CSV at %s", correspondencePath.string().c_str());
+            }
+
+            const std::filesystem::path jacobianPath =
+                std::filesystem::path(diagnosticsOutputDir) / (diagnosticsFilePrefix + "_lm_to_factor_jacobian.csv");
+            lmToFactorJacobianFile.open(jacobianPath, std::ios::out | std::ios::trunc);
+            if (lmToFactorJacobianFile.is_open())
+            {
+                lmToFactorJacobianFileOpen = true;
+                lmToFactorJacobianFile << "keyframe_index,timestamp";
+                for (int row = 0; row < 6; ++row)
+                    for (int col = 0; col < 6; ++col)
+                        lmToFactorJacobianFile << ",a_" << row << "_" << col;
+                lmToFactorJacobianFile << '\n';
+                RCLCPP_INFO(get_logger(), "LM-to-factor Jacobian CSV opened at %s", jacobianPath.string().c_str());
+            }
+            else
+            {
+                RCLCPP_WARN(get_logger(), "Failed to open LM-to-factor Jacobian CSV at %s", jacobianPath.string().c_str());
+            }
+        }
     }
 
     void writeAggregateDiagnosticsHeader(std::ofstream& file)
@@ -508,7 +576,7 @@ public:
             << "num_corner,num_surface,num_total,"
             << "mean_abs_raw_residual,rmse_raw_residual,"
             << "mean_geometry_reliability,mean_residual_reliability,mean_combined_reliability,"
-            << "effective_correspondence_ratio,"
+            << "effective_correspondence_ratio,factor_range_noise_alpha,mean_range_weight,"
             << "raw_info_eig_0,raw_info_eig_1,raw_info_eig_2,raw_info_eig_3,raw_info_eig_4,raw_info_eig_5,"
             << "weighted_info_eig_0,weighted_info_eig_1,weighted_info_eig_2,weighted_info_eig_3,weighted_info_eig_4,weighted_info_eig_5,"
             << "raw_condition_number,weighted_condition_number,"
@@ -552,7 +620,9 @@ public:
              << diagnostics.meanGeometryReliability << ","
              << diagnostics.meanResidualReliability << ","
              << diagnostics.meanCombinedReliability << ","
-             << diagnostics.effectiveCorrespondenceRatio;
+             << diagnostics.effectiveCorrespondenceRatio << ","
+             << diagnostics.factorRangeNoiseAlpha << ","
+             << diagnostics.meanRangeWeight;
 
         for (int i = 0; i < 6; ++i)
             file << "," << diagnostics.rawInformationEigenvalues(i);
@@ -611,6 +681,60 @@ public:
     {
         if (keyframeDiagnosticsFileOpen)
             writeAggregateDiagnosticsRow(keyframeDiagnosticsFile, keyframeIndex, diagnostics, usedFixedFallback);
+    }
+
+    void writePerCorrespondenceDiagnostics(
+        int keyframeIndex,
+        const FactorInformationDiagnostics& diagnostics)
+    {
+        if (correspondenceDiagnosticsFileOpen)
+        {
+            correspondenceDiagnosticsFile << std::fixed << std::setprecision(9);
+            for (std::size_t index = 0; index < finalCorrespondences.size(); ++index)
+            {
+                const auto& correspondence = finalCorrespondences[index];
+                const double scaledResidual =
+                    correspondence.lioSamBaseScale * correspondence.rawResidual;
+                const double factorWeight = computeFactorWeight(correspondence);
+                const double alphaRange = factorRangeNoiseAlpha * correspondence.sensorRange;
+                const double rangeWeight = factorRangeNoiseAlpha > 0.0
+                    ? 1.0 / (1.0 + alphaRange * alphaRange)
+                    : 1.0;
+                correspondenceDiagnosticsFile
+                    << keyframeIndex << ","
+                    << diagnostics.timestamp << ","
+                    << index << ","
+                    << static_cast<int>(correspondence.type) << ","
+                    << correspondence.sensorPoint.x() << ","
+                    << correspondence.sensorPoint.y() << ","
+                    << correspondence.sensorPoint.z() << ","
+                    << correspondence.mapPoint.x() << ","
+                    << correspondence.mapPoint.y() << ","
+                    << correspondence.mapPoint.z() << ","
+                    << correspondence.rawResidual << ","
+                    << correspondence.lioSamBaseScale << ","
+                    << scaledResidual << ","
+                    << correspondence.geometryReliability << ","
+                    << correspondence.residualReliability << ","
+                    << factorWeight << ","
+                    << correspondence.sensorRange << ","
+                    << rangeWeight;
+                for (int column = 0; column < 6; ++column)
+                    correspondenceDiagnosticsFile << "," << correspondence.baseJacobian(column);
+                correspondenceDiagnosticsFile << '\n';
+            }
+        }
+
+        if (lmToFactorJacobianFileOpen && lastLmToFactorJacobianValid)
+        {
+            lmToFactorJacobianFile << std::fixed << std::setprecision(9)
+                                   << keyframeIndex << ","
+                                   << diagnostics.timestamp;
+            for (int row = 0; row < 6; ++row)
+                for (int col = 0; col < 6; ++col)
+                    lmToFactorJacobianFile << "," << lastLmToFactorJacobian(row, col);
+            lmToFactorJacobianFile << '\n';
+        }
     }
 
     std::string csvEscape(const std::string& value) const
@@ -1581,7 +1705,11 @@ public:
         return row;
     }
 
-    void addFinalCorrespondence(const PointType& pointOri, const PointType& coeff, const ResidualReliability& reliability)
+    void addFinalCorrespondence(
+        const PointType& pointOri,
+        const PointType& pointSel,
+        const PointType& coeff,
+        const ResidualReliability& reliability)
     {
         FinalCorrespondence correspondence;
         correspondence.type = reliability.featureType == 1
@@ -1590,6 +1718,9 @@ public:
         correspondence.rawResidual = reliability.rawResidual;
         correspondence.lioSamBaseScale = reliability.lioSamBaseScale;
         correspondence.baseJacobian = computeBaseJacobianRow(pointOri, coeff);
+        correspondence.sensorPoint << pointOri.x, pointOri.y, pointOri.z;
+        correspondence.sensorRange = correspondence.sensorPoint.norm();
+        correspondence.mapPoint << pointSel.x, pointSel.y, pointSel.z;
         correspondence.geometryReliability = reliability.geometry;
         correspondence.residualReliability = reliability.residual;
         finalCorrespondences.push_back(correspondence);
@@ -1681,7 +1812,8 @@ public:
         const std::array<float, 6>& currentLmPose,
         const Eigen::Matrix<double, 6, 6>& covarianceLm,
         gtsam::Matrix6* covarianceRelative,
-        std::string* errorMessage) const
+        std::string* errorMessage,
+        Eigen::Matrix<double, 6, 6>* lmToFactorJacobian = nullptr) const
     {
         if (!covarianceRelative)
         {
@@ -1700,6 +1832,8 @@ public:
         Eigen::Matrix<double, 6, 6> jacobian;
         if (!computeLmToRelativeFactorJacobian(previousPose, currentLmPose, &jacobian, errorMessage))
             return false;
+        if (lmToFactorJacobian)
+            *lmToFactorJacobian = jacobian;
 
         Eigen::Matrix<double, 6, 6> covariance =
             jacobian * covarianceLm * jacobian.transpose();
@@ -2236,7 +2370,7 @@ public:
                             coeff.intensity,
                             s,
                             1);
-                        addFinalCorrespondence(pointOri, coeff, reliability);
+                        addFinalCorrespondence(pointOri, pointSel, coeff, reliability);
                     }
                 }
             }
@@ -2308,7 +2442,7 @@ public:
                             coeff.intensity,
                             s,
                             2);
-                        addFinalCorrespondence(pointOri, coeff, reliability);
+                        addFinalCorrespondence(pointOri, pointSel, coeff, reliability);
                     }
                 }
             }
@@ -2330,6 +2464,7 @@ public:
         localDiagnostics.factorCovarianceScaleMode = factorCovarianceScaleMode;
         localDiagnostics.factorCovarianceAdaptiveBlend = factorCovarianceAdaptiveBlend;
         localDiagnostics.factorCovarianceSafetyFloorEnabled = factorCovarianceSafetyFloorEnabled;
+        localDiagnostics.factorRangeNoiseAlpha = factorRangeNoiseAlpha;
 
         if (factorCovarianceMode == 0)
         {
@@ -2368,6 +2503,7 @@ public:
         double residualReliabilitySum = 0.0;
         double combinedReliabilitySum = 0.0;
         double selectedWeightSum = 0.0;
+        double rangeWeightSum = 0.0;
 
         for (const auto& correspondence : finalCorrespondences)
         {
@@ -2379,9 +2515,13 @@ public:
             const Eigen::Matrix<double, 6, 1> jacobianT = correspondence.baseJacobian.transpose();
             const Eigen::Matrix<double, 6, 6> contribution = jacobianT * correspondence.baseJacobian;
             const double factorWeight = computeFactorWeight(correspondence);
+            const double alphaRange = factorRangeNoiseAlpha * correspondence.sensorRange;
+            const double rangeWeight = factorRangeNoiseAlpha > 0.0
+                ? 1.0 / (1.0 + alphaRange * alphaRange)
+                : 1.0;
 
             lastRawInformation += contribution;
-            lastWeightedInformation += factorWeight * contribution;
+            lastWeightedInformation += factorWeight * rangeWeight * contribution;
 
             absResidualSum += std::abs(correspondence.rawResidual);
             residualSquareSum += correspondence.rawResidual * correspondence.rawResidual;
@@ -2389,6 +2529,7 @@ public:
             residualReliabilitySum += correspondence.residualReliability;
             combinedReliabilitySum += correspondence.geometryReliability * correspondence.residualReliability;
             selectedWeightSum += factorWeight;
+            rangeWeightSum += rangeWeight;
         }
 
         localDiagnostics.numTotal = finalCorrespondences.size();
@@ -2399,6 +2540,7 @@ public:
         localDiagnostics.meanResidualReliability = residualReliabilitySum / correspondenceCount;
         localDiagnostics.meanCombinedReliability = combinedReliabilitySum / correspondenceCount;
         localDiagnostics.effectiveCorrespondenceRatio = selectedWeightSum / correspondenceCount;
+        localDiagnostics.meanRangeWeight = rangeWeightSum / correspondenceCount;
 
         lastRawInformation = 0.5 * (lastRawInformation + lastRawInformation.transpose());
         lastWeightedInformation = 0.5 * (lastWeightedInformation + lastWeightedInformation.transpose());
@@ -2876,6 +3018,8 @@ public:
 
     void addOdomFactor()
     {
+        lastLmToFactorJacobian.setIdentity();
+        lastLmToFactorJacobianValid = false;
         if (cloudKeyPoses3D->points.empty())
         {
             noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
@@ -2913,7 +3057,8 @@ public:
                     currentLmPose,
                     lastLidarFactorCovarianceLoam,
                     &lastLidarFactorCovarianceGtsam,
-                    &covarianceError);
+                    &covarianceError,
+                    &lastLmToFactorJacobian);
                 if (useAdaptiveCovariance && factorCovarianceSafetyFloorEnabled)
                 {
                     useAdaptiveCovariance = applyRelativeFactorCovarianceSafetyFloor(
@@ -2947,10 +3092,12 @@ public:
             lastFactorInformationDiagnostics.factorCovarianceUsedAdaptive = useAdaptiveCovariance;
             lastFactorInformationDiagnostics.mappedFactorCovariance =
                 useAdaptiveCovariance ? lastLidarFactorCovarianceGtsam : fixedOdometryCovarianceLoam();
+            lastLmToFactorJacobianValid = useAdaptiveCovariance;
 
             gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), relativeMeasurement, odometryNoise));
             initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
             writeKeyframeFactorDiagnostics(targetKeyframeIndex, lastFactorInformationDiagnostics, !useAdaptiveCovariance);
+            writePerCorrespondenceDiagnostics(targetKeyframeIndex, lastFactorInformationDiagnostics);
         }
 
         invalidateLidarFactorCovariance();

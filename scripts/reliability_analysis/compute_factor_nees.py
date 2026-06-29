@@ -23,6 +23,7 @@ except ImportError as exc:
 
 
 DOF = 6
+BLOCK_DOF = 3
 COVARIANCE_COLUMNS = [f"mapped_cov_{row}_{col}" for row in range(6) for col in range(row, 6)]
 REQUIRED_COLUMNS = {
     "timestamp",
@@ -58,6 +59,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-gt-gap", type=float, default=0.2)
     parser.add_argument("--reliable-min", type=float, default=0.75)
     parser.add_argument("--corrupted-max", type=float, default=0.4)
+    parser.add_argument(
+        "--gt-position-coordinates",
+        choices=("local", "ecef"),
+        default="local",
+        help=(
+            "Coordinate system of GT positions. ECEF positions are converted to a local "
+            "ENU frame before interpolation."
+        ),
+    )
+    parser.add_argument(
+        "--gt-orientation-coordinates",
+        choices=("local", "ecef"),
+        default="local",
+        help=(
+            "Coordinate system in which GT quaternions express body attitude. With ECEF "
+            "positions and local attitudes, positions are converted to ENU while quaternions "
+            "remain unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--ecef-origin",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        default=None,
+        help="Optional ECEF origin in meters. Defaults to the first GT position.",
+    )
     parser.add_argument(
         "--gt-to-factor-translation",
         type=float,
@@ -168,6 +196,93 @@ def compose_body_transform(
         rotation_world_gt @ rotation_gt_factor,
         translation_world_gt + rotation_world_gt @ translation_gt_factor,
     )
+
+
+def ecef_to_enu_frame(origin_ecef: np.ndarray) -> tuple[np.ndarray, float, float]:
+    origin = np.asarray(origin_ecef, dtype=float)
+    if origin.shape != (3,) or not np.all(np.isfinite(origin)):
+        raise ValueError("ECEF origin must contain three finite values")
+
+    semi_major_axis = 6378137.0
+    eccentricity_squared = 6.69437999014e-3
+    x, y, z = origin
+    horizontal = math.hypot(x, y)
+    if horizontal <= 1e-6:
+        raise ValueError("ECEF origin is too close to the polar axis")
+    longitude = math.atan2(y, x)
+    latitude = math.atan2(z, horizontal * (1.0 - eccentricity_squared))
+    for _ in range(15):
+        sin_latitude = math.sin(latitude)
+        prime_vertical = semi_major_axis / math.sqrt(
+            1.0 - eccentricity_squared * sin_latitude * sin_latitude
+        )
+        height = horizontal / math.cos(latitude) - prime_vertical
+        updated = math.atan2(
+            z,
+            horizontal
+            * (1.0 - eccentricity_squared * prime_vertical / (prime_vertical + height)),
+        )
+        if abs(updated - latitude) <= 1e-14:
+            latitude = updated
+            break
+        latitude = updated
+
+    sin_latitude, cos_latitude = math.sin(latitude), math.cos(latitude)
+    sin_longitude, cos_longitude = math.sin(longitude), math.cos(longitude)
+    rotation_enu_ecef = np.array(
+        [
+            [-sin_longitude, cos_longitude, 0.0],
+            [-sin_latitude * cos_longitude, -sin_latitude * sin_longitude, cos_latitude],
+            [cos_latitude * cos_longitude, cos_latitude * sin_longitude, sin_latitude],
+        ],
+        dtype=float,
+    )
+    return rotation_enu_ecef, latitude, longitude
+
+
+def convert_ground_truth_coordinates(
+    translations: np.ndarray,
+    quaternions: np.ndarray,
+    position_coordinates: str,
+    orientation_coordinates: str,
+    ecef_origin: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    if position_coordinates == "local":
+        if orientation_coordinates != "local":
+            raise ValueError("ECEF GT orientations require ECEF GT positions")
+        if ecef_origin is not None:
+            raise ValueError("--ecef-origin requires --gt-position-coordinates ecef")
+        return translations, quaternions, {
+            "gt_position_coordinates": "local",
+            "gt_orientation_coordinates": "local",
+            "enu_origin_ecef": None,
+            "enu_origin_lat_lon_deg": None,
+        }
+
+    origin = (
+        np.asarray(ecef_origin, dtype=float)
+        if ecef_origin is not None
+        else np.asarray(translations[0], dtype=float)
+    )
+    rotation_enu_ecef, latitude, longitude = ecef_to_enu_frame(origin)
+    converted_translations = (rotation_enu_ecef @ (translations - origin).T).T
+    if orientation_coordinates == "ecef":
+        converted_quaternions = np.asarray(
+            [
+                matrix_to_quaternion(rotation_enu_ecef @ quaternion_to_matrix(quaternion))
+                for quaternion in quaternions
+            ],
+            dtype=float,
+        )
+    else:
+        converted_quaternions = quaternions.copy()
+    metadata: dict[str, object] = {
+        "gt_position_coordinates": "ecef",
+        "gt_orientation_coordinates": orientation_coordinates,
+        "enu_origin_ecef": origin.tolist(),
+        "enu_origin_lat_lon_deg": [math.degrees(latitude), math.degrees(longitude)],
+    }
+    return converted_translations, converted_quaternions, metadata
 
 
 def write_transformed_tum(
@@ -391,6 +506,17 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     gt_timestamps, gt_translations, gt_quaternions = load_tum(gt_path)
+    try:
+        gt_translations, gt_quaternions, coordinate_metadata = convert_ground_truth_coordinates(
+            gt_translations,
+            gt_quaternions,
+            args.gt_position_coordinates,
+            args.gt_orientation_coordinates,
+            np.asarray(args.ecef_origin, dtype=float) if args.ecef_origin is not None else None,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     rotation_gt_factor = rpy_degrees_to_matrix(tuple(args.gt_to_factor_rpy_deg))
     translation_gt_factor = np.asarray(args.gt_to_factor_translation, dtype=float)
     if args.write_transformed_gt:
@@ -458,6 +584,18 @@ def main() -> int:
             if not np.all(np.isfinite(covariance)) or float(np.min(eigenvalues)) <= 0.0:
                 raise ValueError("mapped covariance is not finite positive definite")
             nees = float(error @ np.linalg.solve(covariance, error))
+            rotation_nees = float(
+                error[:BLOCK_DOF]
+                @ np.linalg.solve(
+                    covariance[:BLOCK_DOF, :BLOCK_DOF], error[:BLOCK_DOF]
+                )
+            )
+            translation_nees = float(
+                error[BLOCK_DOF:]
+                @ np.linalg.solve(
+                    covariance[BLOCK_DOF:, BLOCK_DOF:], error[BLOCK_DOF:]
+                )
+            )
             sign, log_determinant = np.linalg.slogdet(covariance)
             if sign <= 0.0:
                 raise ValueError("mapped covariance determinant is not positive")
@@ -491,6 +629,8 @@ def main() -> int:
                 "covariance_min_eigenvalue": float(np.min(eigenvalues)),
                 "covariance_max_eigenvalue": float(np.max(eigenvalues)),
                 "nees": nees,
+                "rotation_nees": rotation_nees,
+                "translation_nees": translation_nees,
                 "nll": nll,
                 "inside_two_sided_confidence": int(chi2_lower <= nees <= chi2_upper),
                 "inside_upper_confidence": int(nees <= chi2_upper_one_sided),
@@ -508,6 +648,8 @@ def main() -> int:
         writer.writerows(per_factor)
 
     nees_values = [float(row["nees"]) for row in per_factor]
+    rotation_nees_values = [float(row["rotation_nees"]) for row in per_factor]
+    translation_nees_values = [float(row["translation_nees"]) for row in per_factor]
     nll_values = [float(row["nll"]) for row in per_factor]
     reliability_values = [float(row["combined_reliability"]) for row in per_factor]
     error_values = [float(row["error_norm"]) for row in per_factor]
@@ -517,6 +659,8 @@ def main() -> int:
     mean_nees_lower = float(chi2.ppf(alpha / 2.0, len(per_factor) * DOF) / len(per_factor))
     mean_nees_upper = float(chi2.ppf(1.0 - alpha / 2.0, len(per_factor) * DOF) / len(per_factor))
     mean_nees = float(np.mean(nees_values))
+    mean_rotation_nees = float(np.mean(rotation_nees_values))
+    mean_translation_nees = float(np.mean(translation_nees_values))
 
     class_summary = {}
     for label in ["reliable", "ambiguous", "corrupted"]:
@@ -542,6 +686,7 @@ def main() -> int:
             "body-transformed GT and factor measurement confirmed to describe the same body frame"
         ),
         "frame_hypothesis": args.frame_hypothesis,
+        **coordinate_metadata,
         "gt_to_factor_translation": translation_gt_factor.tolist(),
         "gt_to_factor_rpy_deg": list(args.gt_to_factor_rpy_deg),
         "factors_total_rows": len(factor_rows),
@@ -553,6 +698,10 @@ def main() -> int:
         "chi2_upper_one_sided": chi2_upper_one_sided,
         "nees": summarize_values(nees_values),
         "normalized_mean_nees": float(mean_nees / DOF),
+        "rotation_nees": summarize_values(rotation_nees_values),
+        "normalized_mean_rotation_nees": float(mean_rotation_nees / BLOCK_DOF),
+        "translation_nees": summarize_values(translation_nees_values),
+        "normalized_mean_translation_nees": float(mean_translation_nees / BLOCK_DOF),
         "mean_nees_confidence_bounds": [mean_nees_lower, mean_nees_upper],
         "mean_nees_inside_bounds": bool(mean_nees_lower <= mean_nees <= mean_nees_upper),
         "nll": summarize_values(nll_values),
@@ -599,6 +748,20 @@ def main() -> int:
         "method": args.method,
         "run_id": args.run_id,
         "frame_hypothesis": args.frame_hypothesis,
+        "gt_position_coordinates": coordinate_metadata["gt_position_coordinates"],
+        "gt_orientation_coordinates": coordinate_metadata["gt_orientation_coordinates"],
+        "enu_origin_ecef_x": (
+            coordinate_metadata["enu_origin_ecef"][0]
+            if coordinate_metadata["enu_origin_ecef"] is not None else ""
+        ),
+        "enu_origin_ecef_y": (
+            coordinate_metadata["enu_origin_ecef"][1]
+            if coordinate_metadata["enu_origin_ecef"] is not None else ""
+        ),
+        "enu_origin_ecef_z": (
+            coordinate_metadata["enu_origin_ecef"][2]
+            if coordinate_metadata["enu_origin_ecef"] is not None else ""
+        ),
         "gt_to_factor_tx": float(translation_gt_factor[0]),
         "gt_to_factor_ty": float(translation_gt_factor[1]),
         "gt_to_factor_tz": float(translation_gt_factor[2]),
@@ -606,6 +769,10 @@ def main() -> int:
         "mean_nees": summary["nees"]["mean"],
         "median_nees": summary["nees"]["median"],
         "normalized_mean_nees": summary["normalized_mean_nees"],
+        "mean_rotation_nees": summary["rotation_nees"]["mean"],
+        "normalized_mean_rotation_nees": summary["normalized_mean_rotation_nees"],
+        "mean_translation_nees": summary["translation_nees"]["mean"],
+        "normalized_mean_translation_nees": summary["normalized_mean_translation_nees"],
         "mean_nees_lower": mean_nees_lower,
         "mean_nees_upper": mean_nees_upper,
         "mean_nees_inside_bounds": int(summary["mean_nees_inside_bounds"]),

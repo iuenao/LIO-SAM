@@ -64,6 +64,7 @@
     factorCovarianceMinCorrespondences: 50
     factorCovarianceScaleMode: 0
     factorNominalResidualSigma: 1.0
+    factorRangeNoiseAlpha: 0.0  # Per-sensor range-noise coefficient; 0.0 = classical Hessian covariance.
     factorCovarianceGlobalMultiplier: 1.0
     factorCovarianceAdaptiveBlend: 1.0
     factorCovarianceSafetyFloorEnabled: false
@@ -97,6 +98,7 @@
     enableTrajectoryCSV: false
     enableDiagnosticsCSV: false
     enablePointLevelReliabilityCSV: false
+    enablePerCorrespondenceCSV: false  # Offline covariance feasibility logging only.
     diagnosticsOutputDir: "/tmp/lio_sam_reliability"
     diagnosticsFilePrefix: "m2ud"
     run_id: "m2ud_method_seed"
